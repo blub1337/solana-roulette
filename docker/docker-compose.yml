@@ -1,0 +1,42 @@
+version: "3.9"
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: roulette
+      POSTGRES_PASSWORD: roulette
+      POSTGRES_DB: roulette
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    environment:
+      PORT: "4000"
+      SOLANA_NETWORK: devnet
+      SOLANA_RPC_URL: https://api.devnet.solana.com
+      PLATFORM_FEE_WALLET: "6B9MXLX4tgbHB9eXheHqK6FmPXCwxYP7No51NqRQHAaR"
+      PLATFORM_FEE_BPS: "750"
+      POOL_TARGET_SOL: "10"
+      DATABASE_URL: postgres://roulette:roulette@db:5432/roulette
+      CHAIN_MODE: demo
+    depends_on:
+      - db
+    ports:
+      - "4000:4000"
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+      NEXT_PUBLIC_SOLANA_NETWORK: devnet
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+volumes:
+  pgdata:

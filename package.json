@@ -1,0 +1,49 @@
+{
+  "name": "solana-roulette",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DEVNET-first decentralized Solana roulette with on-chain escrow, weighted entries and 7.5% on-chain fee.",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/types",
+    "packages/config",
+    "packages/verification",
+    "packages/sdk",
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "prebuild:web": "npm run build -w apps/api --if-present",
+    "build:web": "npm run build -w apps/web",
+    "build:server": "npm run build -w packages/types -w packages/config -w packages/verification -w packages/sdk",
+    "typecheck": "tsc -b",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev:api": "npm run dev -w apps/api",
+    "dev:web": "npm run dev -w apps/web",
+    "start:web": "npm run start -w apps/web",
+    "preview": "sh ./scripts/start-preview.sh",
+    "db:migrate": "npm run db:migrate -w apps/api",
+    "db:generate": "npm run db:generate -w apps/api",
+    "e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.46.0",
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.23.1",
+    "concurrently": "^8.2.2",
+    "pg": "^8.23.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  },
+  "overrides": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/types" },
+    { "path": "packages/config" },
+    { "path": "packages/verification" },
+    { "path": "packages/sdk" },
+    { "path": "apps/api" }
+  ]
+}

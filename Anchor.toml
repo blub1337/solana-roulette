@@ -1,0 +1,24 @@
+[toolchain]
+
+[features]
+resolution = true
+skip-lint = false
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "Devnet"
+wallet = "~/.config/solana/id.json"
+
+[programs.devnet]
+roulette = "AAHBk1qbXCzsbiLe7TiXuZNTvNPVtovtC6NWk9tsi6EZ"
+
+[programs.localnet]
+roulette = "AAHBk1qbXCzsbiLe7TiXuZNTvNPVtovtC6NWk9tsi6EZ"
+
+[scripts]
+test = "yarn run ts-mocha -p ./tsconfig.anchor.json -t 1000000 programs/roulette/tests/**/*.ts"
+
+# Programs are built from programs/roulette (Cargo.toml) — see docs/SMART_CONTRACT.md.
+# Program ID is declared in programs/roulette/Anchor.toml + declare_id! in lib.rs.

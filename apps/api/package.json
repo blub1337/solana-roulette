@@ -1,0 +1,38 @@
+{
+  "name": "@solana-roulette/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev"
+  },
+  "prisma": {
+    "schema": "prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@fastify/cors": "^8.5.0",
+    "@noble/curves": "^2.4.0",
+    "@prisma/client": "^5.18.0",
+    "@solana-roulette/config": "*",
+    "@solana-roulette/sdk": "*",
+    "@solana-roulette/types": "*",
+    "@solana-roulette/verification": "*",
+    "@solana/web3.js": "^1.95.3",
+    "bs58": "^5.0.0",
+    "fastify": "^4.28.1",
+    "fastify-plugin": "^4.5.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "prisma": "^5.18.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.0.5"
+  }
+}

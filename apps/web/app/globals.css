@@ -1,0 +1,149 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 50% -10%, rgba(18, 80, 47, 0.55), transparent 60%),
+    radial-gradient(800px 400px at 80% 110%, rgba(230, 185, 60, 0.08), transparent 60%),
+    #04140c;
+  min-height: 100vh;
+}
+
+/* ------------------------------------------------------------------ */
+/* Surfaces                                                            */
+/* ------------------------------------------------------------------ */
+
+.felt-card {
+  @apply rounded-2xl border border-felt-600/60 bg-felt-900/70 backdrop-blur-sm;
+}
+
+.panel {
+  @apply rounded-2xl border border-white/10 bg-white/[0.03] backdrop-blur;
+}
+
+.tier-card {
+  @apply panel relative overflow-hidden p-6 transition-all duration-300;
+}
+.tier-card:hover {
+  transform: translateY(-4px);
+}
+
+/* Tier accent glows (set via data-tier) */
+.tier-card[data-tier="0"] { border-color: rgba(52, 211, 153, 0.25); }
+.tier-card[data-tier="0"]:hover { box-shadow: 0 0 40px rgba(52, 211, 153, 0.18); border-color: rgba(52, 211, 153, 0.5); }
+.tier-card[data-tier="1"] { border-color: rgba(56, 189, 248, 0.25); }
+.tier-card[data-tier="1"]:hover { box-shadow: 0 0 40px rgba(56, 189, 248, 0.18); border-color: rgba(56, 189, 248, 0.5); }
+.tier-card[data-tier="2"] { border-color: rgba(167, 139, 250, 0.25); }
+.tier-card[data-tier="2"]:hover { box-shadow: 0 0 40px rgba(167, 139, 250, 0.18); border-color: rgba(167, 139, 250, 0.5); }
+
+/* ------------------------------------------------------------------ */
+/* Buttons                                                             */
+/* ------------------------------------------------------------------ */
+
+.btn-gold {
+  @apply inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-b from-gold-400 to-gold-500 px-5 py-2.5 font-semibold text-felt-950 shadow-gold-glow transition hover:from-gold-300 hover:to-gold-400 hover:shadow-gold-glow active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 disabled:active:scale-100;
+}
+
+.btn-ghost {
+  @apply inline-flex items-center justify-center gap-2 rounded-xl border border-felt-600 px-5 py-2.5 font-semibold text-ivory transition hover:border-gold-500 hover:text-gold-300 active:scale-[0.98] disabled:opacity-40 disabled:active:scale-100;
+}
+
+/* ------------------------------------------------------------------ */
+/* Typography                                                          */
+/* ------------------------------------------------------------------ */
+
+.gold-text {
+  @apply font-display text-gold-400;
+}
+
+.stat-label {
+  @apply text-xs uppercase tracking-widest text-ivory/60;
+}
+
+.stat-value {
+  @apply font-display text-2xl text-gold-300;
+}
+
+.hero-title {
+  @apply font-display text-4xl leading-tight sm:text-5xl lg:text-6xl;
+  background: linear-gradient(120deg, #f5f1e6 0%, #f2cf62 55%, #c79a26 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ------------------------------------------------------------------ */
+/* States                                                              */
+/* ------------------------------------------------------------------ */
+
+.status-pill {
+  @apply inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wider;
+}
+.status-pill[data-status="OPEN"]                { @apply border-emerald-500/40 bg-emerald-500/10 text-emerald-300; }
+.status-pill[data-status="FULL"]                { @apply border-sky-500/40 bg-sky-500/10 text-sky-300; }
+.status-pill[data-status="LOCKED"]              { @apply border-sky-500/40 bg-sky-500/10 text-sky-300; }
+.status-pill[data-status="RANDOMNESS_PENDING"]  { @apply border-amber-500/40 bg-amber-500/10 text-amber-300; }
+.status-pill[data-status="SETTLING"]            { @apply border-amber-500/40 bg-amber-500/10 text-amber-300; }
+.status-pill[data-status="COMPLETED"]           { @apply border-gold-500/40 bg-gold-500/10 text-gold-300; }
+.status-pill[data-status="CANCELLED"]           { @apply border-roulette-red/50 bg-roulette-red/10 text-roulette-red; }
+
+.banner-error {
+  @apply mb-6 flex items-start gap-3 rounded-xl border border-roulette-red/60 bg-roulette-red/10 px-4 py-3 text-sm text-roulette-red;
+}
+
+.banner-success {
+  @apply mb-6 flex items-start gap-3 rounded-xl border border-emerald-500/50 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300;
+}
+
+.banner-info {
+  @apply mb-6 flex items-start gap-3 rounded-xl border border-sky-500/40 bg-sky-500/10 px-4 py-3 text-sm text-sky-200;
+}
+
+/* ------------------------------------------------------------------ */
+/* Progress                                                            */
+/* ------------------------------------------------------------------ */
+
+.pool-track {
+  @apply h-2.5 w-full overflow-hidden rounded-full bg-felt-800 ring-1 ring-inset ring-white/5;
+}
+
+.pool-fill {
+  @apply h-full rounded-full transition-all duration-700 ease-out;
+  background-size: 200% 100%;
+  animation: shimmer 2.4s linear infinite;
+}
+.pool-fill[data-tier="0"] { background: linear-gradient(90deg, #10b981, #34d399, #10b981); }
+.pool-fill[data-tier="1"] { background: linear-gradient(90deg, #0284c7, #38bdf8, #0284c7); }
+.pool-fill[data-tier="2"] { background: linear-gradient(90deg, #7c3aed, #a78bfa, #7c3aed); }
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Skeleton loading */
+.skeleton {
+  @apply animate-pulse rounded-lg bg-felt-800/80;
+}
+
+/* Winner pop-in */
+@keyframes winner-pop {
+  0% { transform: scale(0.85); opacity: 0; }
+  60% { transform: scale(1.04); }
+  100% { transform: scale(1); opacity: 1; }
+}
+.winner-pop { animation: winner-pop 0.5s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@keyframes spin-slow { to { transform: rotate(360deg); } }
+.animate-spin-slow { animation: spin-slow 3s linear infinite; }
+
+/* Reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .pool-fill, .animate-spin-slow, .winner-pop { animation: none; }
+  .tier-card:hover { transform: none; }
+}

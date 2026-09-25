@@ -1,0 +1,30 @@
+node_modules/
+.next/
+dist/
+build/
+.turbo/
+*.tsbuildinfo
+.anchor/
+target/
+test-ledger/
+.DS_Store
+*.local
+.env
+.env.local
+.env.*.local
+operator*.json
+# Generated devnet operator SECRET (64-byte array). Never commit, never paste
+# into a repo, an issue or a chat — it signs payouts.
+operator-devnet.key.json
+*.key.json
+*.keypair.json
+# Staged Render env line produced by scripts/set-render-operator-key.mjs --stage (contains the secret)
+.render-admin.env
+id.json
+wallet.json
+prisma/migrations/dev/
+# Workspace tool config (Freebuff/Vly) — not part of the product
+.claude/
+.vly-run/
+playwright-report/
+test-results/

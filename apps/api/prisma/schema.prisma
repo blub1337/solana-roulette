@@ -1,0 +1,78 @@
+// Audit/index layer only — Solana chain state is the source of truth.
+// Rows are marked verified only after independent RPC reconciliation.
+// BigInt lamports everywhere; serialized as strings over REST.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model GlobalSettings {
+  id           Int      @id @default(1)
+  configPubkey String   @unique
+  operator     String
+  treasury     String
+  feeBps       Int
+  maxRoundSize BigInt
+  minDeposit   BigInt
+  maxDeposit   BigInt
+  updatedAt    DateTime @updatedAt
+}
+
+model Round {
+  id               BigInt    @id
+  status           String
+  escrow           String
+  pot              BigInt    @default(0)
+  participantCount Int       @default(0)
+  lockSlot         BigInt?
+  revealSlot       BigInt?
+  feeBps           Int?
+  randomness       Bytes?
+  winningTicket    BigInt?
+  winner           String?
+  feeLamports      BigInt?
+  payoutLamports   BigInt?
+  settleSlot       BigInt?
+  verified         Boolean   @default(false)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  entries          Entry[]
+  transactions     TxRecord[]
+
+  @@index([status])
+}
+
+model Entry {
+  id          BigInt   @default(autoincrement()) @id
+  roundId     BigInt
+  wallet      String
+  amount      BigInt
+  weightStart BigInt
+  index       Int
+  txSignature String?  @unique
+  verified    Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  round       Round    @relation(fields: [roundId], references: [id])
+
+  @@unique([roundId, wallet])
+}
+
+model TxRecord {
+  id        BigInt    @default(autoincrement()) @id
+  signature String    @unique
+  roundId   BigInt?
+  kind      String
+  wallet    String?
+  amount    BigInt?
+  slot      BigInt?
+  blockTime DateTime?
+  status    String
+  error     String?
+  createdAt DateTime  @default(now())
+  round     Round?    @relation(fields: [roundId], references: [id])
+}
