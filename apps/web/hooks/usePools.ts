@@ -1,8 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { API_BASE } from "../lib/apiBase";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? ""; // same-origin proxy
+const API = API_BASE; // production-safe API base (same-origin in dev)
 
 export interface PoolDto {
   tier: number;

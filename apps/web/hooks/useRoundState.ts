@@ -2,8 +2,9 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { RoundSummary, EntryDto } from "@solana-roulette/types";
+import { API_BASE } from "../lib/apiBase";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? ""; // same-origin proxy; tier routes below
+const API = API_BASE; // production-safe API base (same-origin in dev); tier routes below
 
 interface RoundResponse {
   round: RoundSummary | null;

@@ -27,8 +27,9 @@ import {
 } from "@solana-roulette/verification";
 import { LAMPORTS_PER_SOL } from "@solana-roulette/types";
 import { clientTxLog } from "../lib/txLog";
+import { API_BASE } from "../lib/apiBase";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? ""; // same-origin proxy
+const API = API_BASE; // production-safe API base (same-origin in dev)
 const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 /** Extra lamports kept for the fee payer so the transfer can never stall. */

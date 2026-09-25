@@ -10,9 +10,11 @@
  * deposit kill switch, nothing else. There is no field anywhere in this app
  * that can store, display or transmit `OPERATOR_KEYPAIR` or a private key.
  */
+import { API_BASE } from "./apiBase";
+
 const STORAGE_KEY = "solana-roulette.admin-token";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? ""; // same-origin proxy
+const API = API_BASE; // production-safe API base (same-origin in dev)
 
 export class AdminApiError extends Error {
   constructor(
