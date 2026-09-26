@@ -16,7 +16,9 @@ cpi = ["no-entrypoint"]
 default = []
 
 [dependencies]
-anchor-lang = "0.30.1"
+# init-if-needed: deposit() uses init_if_needed for the Participant PDA and
+# guards re-entry itself (DuplicateDeposit when the wallet is already set).
+anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
 sha2 = "0.10"
 
 [dev-dependencies]
