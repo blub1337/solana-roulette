@@ -16,7 +16,7 @@
  *   PayWinners:       [config, round(w), escrow(w), winner_account(w), treasury(w), operator(s,w), system]
  *   CancelRound:      [config, round(w), escrow(w), operator(s,w), system] + remaining (Participant, wallet) pairs
  */
-import { PublicKey, SystemProgram, TransactionInstruction } from "@solana/web3.js";
+import { PublicKey, SYSVAR_SLOT_HASHES_PUBKEY, SystemProgram, TransactionInstruction } from "@solana/web3.js";
 import { createHash } from "node:crypto";
 import { configPda, escrowPda, participantPda, roundPda, SEED_CONFIG, SEED_ESCROW, SEED_PARTICIPANT, SEED_ROUND } from "./pda.js";
 
@@ -36,7 +36,8 @@ const u64 = (v: bigint | number) => {
   return b;
 };
 
-export const SLOT_HASHES_SYSVAR = new PublicKey("SysvarS1otHashes11111111111111111111111111111111");
+/** SlotHashes sysvar — canonical constant from web3.js (a hand-typed string here was invalid and crashed module import). */
+export const SLOT_HASHES_SYSVAR = SYSVAR_SLOT_HASHES_PUBKEY;
 
 export type Meta = { pubkey: PublicKey; isSigner: boolean; isWritable: boolean };
 const meta = (pubkey: PublicKey, isSigner = false, isWritable = false): Meta => ({ pubkey, isSigner, isWritable });
@@ -94,8 +95,13 @@ export function createRoundInstruction(
     programId,
     keys: [
       meta(configPda(programId), false, true),
-      meta(round, false, true), // `zero`: created here
-      meta(escrowPda(programId, round), false, true), // rent-funded escrow
+      // Both accounts are PDAs the program creates for itself: the round id
+      // comes from an instruction ARG, so the program signs for them with
+      // invoke_signed. A client can never sign for a PDA, so these must stay
+      // NON-signers here — declaring them as signers makes the transaction
+      // fail signature verification at the RPC.
+      meta(round, false, true),
+      meta(escrowPda(programId, round), false, true),
       meta(operator, true, true),
       meta(SystemProgram.programId),
     ],
