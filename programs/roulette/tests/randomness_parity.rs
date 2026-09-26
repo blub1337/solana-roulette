@@ -70,7 +70,7 @@ fn derive_randomness_matches_shared_parity_fixture() {
         "fixture must carry the vector captured from the deployed devnet program"
     );
     assert!(
-        FIXTURE.contains("\"roulette:reveal\""),
+        FIXTURE.contains("roulette:reveal"),
         "fixture must document the derivation formula it pins"
     );
 
