@@ -127,14 +127,16 @@ pub struct CreateRound<'info> {
     /// CHECK: manual PDA validation in lib.rs.
     #[account(mut)]
     pub config: Account<'info, GlobalConfig>,
-    /// Round PDA: allocated and rent-paid by the operator THIS instruction.
-    /// Anchor 0.30 cannot use instruction args in `seeds =`, so the arg-derived
-    /// seed match (args.round_id → PDA) is enforced in lib.rs right after the
-    /// context resolves; `init` then guarantees the account is fresh and
-    /// program-owned before any field is written.
-    #[account(init, payer = operator, space = ROUND_SPACE)]
-    pub round: Account<'info, Round>,
-    /// CHECK: manual seed validation in lib.rs; funded via system CPI there.
+    /// Round PDA: the round id arrives as an instruction ARG, and Anchor 0.30
+    /// cannot put arg-derived seeds in an `init` constraint. The account is
+    /// therefore created by a signed create_account CPI in lib.rs (the program
+    /// is the only party that can sign for a PDA), and the client passes it as
+    /// a plain writable account. The arg→PDA seed match is checked in lib.rs.
+    /// CHECK: created + deserialized by hand in lib.rs.
+    #[account(mut)]
+    pub round: UncheckedAccount<'info>,
+    /// CHECK: manual seed validation in lib.rs; created there via a signed
+    /// create_account CPI and rent-funded so payouts always clear.
     #[account(mut)]
     pub escrow: UncheckedAccount<'info>,
     #[account(mut)]
