@@ -128,16 +128,24 @@ jobs:
             --keypair ~/.config/solana/id.json \
             --url https://api.devnet.solana.com \
             --output json
-          # `solana program show` races RPC propagation: right after the deploy
-          # lands it can still answer "Unable to find the account" and fail the
-          # whole run even though the deploy succeeded. Retry, then re-check via
-          # the raw RPC so the step's verdict matches reality.
+          # `solana program show` answers "Unable to find the account" even for
+          # a program that is already deployed (it does not tolerate the
+          # upgradeable-loader state on this cluster), so verify through the
+          # raw RPC instead and retry briefly for propagation lag.
           for i in 1 2 3 4 5 6 7 8 9 10; do
-            if solana program show "$PROGRAM_ID"; then echo "program visible"; break; fi
-            echo "program not yet visible (attempt $i) — retrying in 6s"
+            ACCT=$(curl -s --retry 3 "$SOLANA_URL" -X POST -H 'Content-Type: application/json' \
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$PROGRAM_ID\",{\"encoding\":\"base64\"}]}" \
+              | grep -o '"executable":[a-z]*' | head -1)
+            if [ "$ACCT" = '"executable":true' ]; then
+              echo "program is live and executable: $PROGRAM_ID"
+              break
+            fi
+            echo "program not yet visible (attempt $i, got: ${ACCT:-none}) - retrying in 6s"
             sleep 6
           done
-          solana program show "$PROGRAM_ID"
+          curl -s "$SOLANA_URL" -X POST -H 'Content-Type: application/json' \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$PROGRAM_ID\",{\"encoding\":\"base64\"}]}"
+          echo
 
       - name: Initialize on-chain config
         run: |
