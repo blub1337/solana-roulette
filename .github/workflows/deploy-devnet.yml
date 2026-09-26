@@ -1,0 +1,102 @@
+name: Deploy program to devnet
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Solana
+        uses: metadaoci/setup-solana-action@v1.2
+        with:
+          solana-version: "2.0.8"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Anchor (avm)
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor avm --locked
+          avm install 0.30.1
+          avm use 0.30.1
+
+      - name: Show toolchain
+        run: |
+          solana --version
+          anchor --version
+          node --version
+
+      - name: Import operator keypair
+        env:
+          OPERATOR_KEYPAIR_B64: ${{ secrets.OPERATOR_KEYPAIR_B64 }}
+        run: |
+          if [ -z "$OPERATOR_KEYPAIR_B64" ]; then
+            echo "SECRET MISSING: OPERATOR_KEYPAIR_B64" >&2
+            exit 1
+          fi
+          mkdir -p ~/.config/solana
+          printf '%s' "$OPERATOR_KEYPAIR_B64" | base64 -d > ~/.config/solana/id.json
+          chmod 600 ~/.config/solana/id.json
+          solana-keygen pubkey ~/.config/solana/id.json
+
+      - name: Fund wallet from devnet faucet (loop)
+        run: |
+          ADDR=$(solana-keygen pubkey ~/.config/solana/id.json)
+          for i in 1 2 3 4 5 6 7 8; do
+            BAL=$(solana balance "$ADDR" | awk '{print $1}')
+            if [ "$(echo "$BAL >= 4" | bc)" = "1" ]; then echo "funded: $BAL SOL"; break; fi
+            echo "airdrop attempt $i..."
+            solana airdrop 2 "$ADDR" || true
+            sleep 15
+          done
+          solana balance "$ADDR"
+          if [ "$(echo "$(solana balance "$ADDR" | awk '{print $1}') < 4" | bc)" = "1" ]; then
+            echo "NOT ENOUGH DEVNET SOL — top up manually at https://faucet.solana.com to $ADDR and re-run" >&2
+            exit 1
+          fi
+
+      - name: Pin program ID (keypair-first, idempotent)
+        run: |
+          mkdir -p programs/roulette/target/deploy
+          KP=programs/roulette/target/deploy/roulette-keypair.json
+          if [ -f "$KP" ]; then
+            solana-keygen pubkey "$KP" || true
+            echo "existing deploy keypair found"
+          else
+            solana-keygen new --no-bip39-phrase --silent -o "$KP"
+            echo "new deterministic-on-rerun deploy keypair generated"
+          fi
+          PROGRAM_ID=$(solana-keygen pubkey "$KP")
+          echo "PROGRAM_ID=$PROGRAM_ID" >> "$GITHUB_ENV"
+          CURRENT=$(grep -o 'declare_id!("[^"]*")' programs/roulette/src/lib.rs | cut -d'"' -f2)
+          echo "program id on chain will be: $PROGRAM_ID (lib.rs currently: $CURRENT)"
+          if [ "$CURRENT" != "$PROGRAM_ID" ]; then
+            sed -i "s/declare_id!(\"[^\"]*\")/declare_id!(\"$PROGRAM_ID\")/" programs/roulette/src/lib.rs
+            grep -n 'declare_id!' programs/roulette/src/lib.rs
+            echo "lib.rs program id updated"
+          fi
+
+      - name: Build program
+        run: anchor build
+
+      - name: Deploy to devnet
+        run: |
+          anchor deploy --provider.cluster https://api.devnet.solana.com
+          solana program show "$PROGRAM_ID" --output json || true
+
+      - name: Initialize on-chain config
+        run: |
+          npx tsx scripts/seed-config.ts
+        env:
+          SOLANA_RPC_URL: https://api.devnet.solana.com
+          OPERATOR_KEYPAIR: ${{ secrets.OPERATOR_KEYPAIR }}
+          ROULETTE_PROGRAM_ID: ${{ env.PROGRAM_ID }}
+          TREASURY_PUBKEY: 6B9MXLX4tgbHB9eXheHqK6FmPXCwxYP7No51NqRQHAaR
+
+      - name: Output program ID
+        run: |
+          echo "program id: $PROGRAM_ID"
+          solana program show "$PROGRAM_ID"
