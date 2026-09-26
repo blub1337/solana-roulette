@@ -281,14 +281,16 @@ pub mod roulette {
         Ok(())
     }
 
-    /// Operator locks a FULL round and commits the reveal slot. Fee snapshot.
+    /// Anyone locks a FULL round, committing the reveal slot and freezing the
+    /// fee snapshot. PERMISSIONLESS BY CONSTRUCTION: every written value is
+    /// either read from the seed-validated `config` PDA or from `Clock::get()`,
+    /// so the caller's identity cannot change the result. The only caller-
+    /// influenced input is the execution slot, and letting anyone lock the
+    /// instant a round goes FULL *removes* the operator's ability to pick a
+    /// favourable reveal slot (grinding) rather than granting one.
     pub fn lock_round(ctx: Context<LockRound>) -> Result<()> {
         let config = &ctx.accounts.config;
         let round = &mut ctx.accounts.round;
-        require!(
-            ctx.accounts.operator.key() == config.operator,
-            RouletteError::InvalidOperator
-        );
         require!(round.status == RoundStatus::Full, RouletteError::RoundNotFull);
 
         let clock = Clock::get()?;
@@ -302,20 +304,30 @@ pub mod roulette {
         Ok(())
     }
 
-    /// Settle phase 1 (operator): derive entropy from the committed future
-    /// blockhash and freeze winner + fee + payout on the Round account. No
-    /// lamports move here. Replay-safe: recomputation is deterministic, and
+    /// Settle phase 1 (PERMISSIONLESS): derive entropy from the committed
+    /// future blockhash and freeze winner + fee + payout on the Round account.
+    /// No lamports move here. Replay-safe: recomputation is deterministic, and
     /// pay_winners later requires RANDOMNESS_PENDING + winner match.
+    ///
+    /// Why this is safe to open to anyone. Every value written is a pure
+    /// function of state the program validates itself:
+    ///   * entropy  <- `slot_hashes`, now address-pinned to the real sysvar, so
+    ///                 a caller cannot supply forged hash bytes;
+    ///   * winner   <- `pick_winner`, which rejects any participant list that
+    ///                 is not the canonical index-ordered weight chain and
+    ///                 requires `count == round.participant_count`, so a caller
+    ///                 cannot substitute, reorder, truncate or pad the entries;
+    ///   * fee/payout <- the FROZEN `round.fee_bps` / `round.pot`, and
+    ///                 `treasury` must equal `config.treasury`.
+    /// The signer is only ever the transaction fee payer. The operator can
+    /// therefore neither stall nor influence settlement — it can only stop
+    /// *submitting*, and anyone (including a competitor) can submit instead.
     ///
     /// `lock_round` moves the round FULL -> RANDOMNESS_PENDING and commits the
     /// reveal slot, so settle must run from RANDOMNESS_PENDING. It previously
     /// required FULL, which made settlement unreachable.
     pub fn settle_round<'info>(ctx: Context<'_, '_, 'info, 'info, SettleRound<'info>>) -> Result<()> {
         let round = &mut ctx.accounts.round;
-        require!(
-            ctx.accounts.operator.key() == ctx.accounts.config.operator,
-            RouletteError::InvalidOperator
-        );
         require!(
             round.status == RoundStatus::RandomnessPending,
             RouletteError::InvalidRoundStatus
@@ -372,9 +384,17 @@ pub mod roulette {
         Ok(())
     }
 
-    /// Settle phase 2: pay 92.5% to the frozen winner account and 7.5% to
-    /// config.treasury, then mark COMPLETED — atomically. Requires
+    /// Settle phase 2 (PERMISSIONLESS): pay 92.5% to the frozen winner account
+    /// and 7.5% to config.treasury, then mark COMPLETED — atomically. Requires
     /// RANDOMNESS_PENDING; a completed round can never be paid again.
+    ///
+    /// Safe to open to anyone: `winner_account` must equal the `round.winner`
+    /// frozen in phase 1, `treasury` must equal `config.treasury`, and both
+    /// amounts are the frozen `payout_lamports` / `fee_lamports`. The caller
+    /// supplies no amount, no recipient and no account that is not already
+    /// pinned on-chain, so a permissionless `pay_winners` moves exactly the
+    /// same lamports to exactly the same accounts as an operator-signed one.
+    /// This is what removes the operator's ability to censor a payout.
     pub fn pay_winners(ctx: Context<PayWinners>) -> Result<()> {
         let round = &mut ctx.accounts.round;
         require!(
@@ -421,6 +441,15 @@ pub mod roulette {
     /// Operator cancels a non-completed round: refunds every participant's
     /// exact deposit from escrow. remaining_accounts are
     /// (Participant_i, wallet_i) pairs; each wallet must match its record.
+    ///
+    /// DELIBERATELY STAYS OPERATOR-ONLY, unlike lock/settle/pay. Refunds are
+    /// exact, so this is not a theft vector — but making it permissionless
+    /// would let anyone front-run settlement of a healthy FULL round, destroy
+    /// the pot and kill the fee. Note it grants no fund-holding power: a FULL
+    /// round can always be settled and paid by anyone, so a vanished operator
+    /// cannot strand user funds. Removing this gate safely would need a
+    /// timeout (refund only after the round is provably unsettleable), which
+    /// is a larger state change than this task allows.
     pub fn cancel_round<'info>(ctx: Context<'_, '_, 'info, 'info, CancelRound<'info>>) -> Result<()> {
         let round = &mut ctx.accounts.round;
         require!(
