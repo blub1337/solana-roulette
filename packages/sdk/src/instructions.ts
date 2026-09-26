@@ -138,10 +138,12 @@ export function depositIx(
 }
 
 // ---------------------------------------------------------------------------
-// lock_round() — operator only
+// lock_round() — PERMISSIONLESS. `payer` is the tx fee payer, not a
+// privileged operator: the instruction writes only seed-validated config
+// values plus Clock::get(), so any signer produces identical state.
 // ---------------------------------------------------------------------------
 
-export function lockRoundIx(programId: PublicKey, operator: PublicKey, roundId: bigint): TransactionInstruction {
+export function lockRoundIx(programId: PublicKey, payer: PublicKey, roundId: bigint): TransactionInstruction {
   const round = roundPda(programId, roundId);
   const data = globalDiscriminator("lock_round");
   return new TransactionInstruction({
@@ -150,19 +152,24 @@ export function lockRoundIx(programId: PublicKey, operator: PublicKey, roundId: 
       meta(configPda(programId), false, false),
       meta(round, false, true),
       meta(escrowPda(programId, round), false, false),
-      meta(operator, true, true),
+      meta(payer, true, true),
     ],
     data,
   });
 }
 
 // ---------------------------------------------------------------------------
-// settle_round(all Participant PDAs as remaining accounts, index order) — operator only
+// settle_round(all Participant PDAs as remaining accounts, index order) —
+// PERMISSIONLESS. Entropy comes from the SlotHashes sysvar (pinned by the
+// program with an `address =` constraint) and the winner walk validates the
+// participant chain, so the caller cannot influence the outcome.
+// `SLOT_HASHES_SYSVAR` MUST NOT be substituted: the program rejects any
+// other address, which is what stops a forged-entropy attack.
 // ---------------------------------------------------------------------------
 
 export function settleRoundIx(
   programId: PublicKey,
-  operator: PublicKey,
+  payer: PublicKey,
   roundId: bigint,
   treasury: PublicKey,
   participants: PublicKey[] // Participant PDAs in Participant.index order
@@ -176,7 +183,7 @@ export function settleRoundIx(
       meta(round, false, true),
       meta(escrowPda(programId, round), false, true),
       meta(treasury, false, false),
-      meta(operator, true, true),
+      meta(payer, true, true),
       meta(SLOT_HASHES_SYSVAR, false, false),
       meta(SystemProgram.programId),
       ...participants.map((p) => meta(p, false, false)),
@@ -186,12 +193,14 @@ export function settleRoundIx(
 }
 
 // ---------------------------------------------------------------------------
-// pay_winners() — operator only; pays 92.5% winner + 7.5% treasury atomically
+// pay_winners() — PERMISSIONLESS; pays 92.5% winner + 7.5% treasury
+// atomically. Recipients and amounts are all frozen on-chain by settle_round,
+// so any signer moves exactly the same lamports to exactly the same accounts.
 // ---------------------------------------------------------------------------
 
 export function payWinnersIx(
   programId: PublicKey,
-  operator: PublicKey,
+  payer: PublicKey,
   roundId: bigint,
   winner: PublicKey,
   treasury: PublicKey
@@ -206,7 +215,7 @@ export function payWinnersIx(
       meta(escrowPda(programId, round), false, true),
       meta(winner, false, true),
       meta(treasury, false, true),
-      meta(operator, true, true),
+      meta(payer, true, true),
       meta(SystemProgram.programId),
     ],
     data,
