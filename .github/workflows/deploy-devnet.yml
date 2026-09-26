@@ -9,8 +9,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Rust
+      # Pinned to 1.82: cargo 1.83+ writes lockfile v4 by default, which the
+      # 1.18 SBF toolchain cannot parse. Anchor's host `cargo metadata` pass
+      # (re)writes programs/roulette/Cargo.lock before cargo-build-sbf runs.
+      - name: Setup Rust (1.82)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.82.0
 
       # Pinned to 1.18.17: Anchor 0.30.1 defaults to this version for the SBF
       # build, so the BPF toolchain's cargo and any host cargo must agree on
