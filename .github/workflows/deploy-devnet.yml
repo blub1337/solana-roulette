@@ -12,10 +12,12 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Setup Solana CLI (Anza)
+      # Pinned to 1.18.17: Anchor 0.30.1 defaults to this version for the SBF
+      # build, so the BPF toolchain's cargo and any host cargo must agree on
+      # Cargo.lock (v4 locks break the 1.18 cargo).
+      - name: Setup Solana CLI (Anza, 1.18.17)
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)" || \
-          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/v1.18.17/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
       - name: Install Anchor (avm)
@@ -60,15 +62,24 @@ jobs:
             exit 1
           fi
 
-      - name: Pin program ID (keypair-first, idempotent)
+      # Deterministic program address: nacl keypair from
+      # sha256("roulette-deploy-v1:" + OPERATOR_KEYPAIR_B64). Same secret in,
+      # same program address out — the ID is reproducible across re-deploys.
+      - name: Derive deterministic deploy keypair + pin program ID
+        env:
+          OPERATOR_KEYPAIR_B64: ${{ secrets.OPERATOR_KEYPAIR_B64 }}
         run: |
-          mkdir -p programs/roulette/target/deploy
-          KP=programs/roulette/target/deploy/roulette-keypair.json
-          if [ -f "$KP" ]; then
-            solana-keygen pubkey "$KP" || true
-          else
-            solana-keygen new --no-bip39-phrase --silent -o "$KP"
-          fi
+          mkdir -p target/deploy
+          npm install --no-save tsx tweetnacl >/dev/null 2>&1
+          node -e '
+            const nacl = require("tweetnacl");
+            const { createHash } = require("crypto");
+            const seed = createHash("sha256").update("roulette-deploy-v1:" + process.env.OPERATOR_KEYPAIR_B64).digest();
+            const kp = nacl.sign.keyPair.fromSeed(seed);
+            require("fs").writeFileSync("target/deploy/roulette-keypair.json", JSON.stringify(Array.from(kp.secretKey)));
+          '
+          KP=target/deploy/roulette-keypair.json
+          chmod 600 "$KP"
           PROGRAM_ID=$(solana-keygen pubkey "$KP")
           echo "PROGRAM_ID=$PROGRAM_ID" >> "$GITHUB_ENV"
           CURRENT=$(grep -o 'declare_id!("[^"]*")' programs/roulette/src/lib.rs | cut -d'"' -f2)
@@ -77,17 +88,31 @@ jobs:
             sed -i "s/declare_id!(\"[^\"]*\")/declare_id!(\"$PROGRAM_ID\")/" programs/roulette/src/lib.rs
             grep -n 'declare_id!' programs/roulette/src/lib.rs
           fi
+          grep -n "$PROGRAM_ID" Anchor.toml || { echo "Anchor.toml program id mismatch" >&2; exit 1; }
 
+      # The host-cargo IDL pass rewrites programs/roulette/Cargo.lock to
+      # lockfile v4, which the 1.18 SBF cargo cannot parse (-Znext-lockfile-bump
+      # error in CI run 36206893044). Drop the lock and skip IDL generation.
       - name: Build program
-        run: anchor build
-
-      - name: Deploy to devnet
         run: |
-          anchor deploy --provider.cluster https://api.devnet.solana.com
-          solana program show "$PROGRAM_ID" || true
+          rm -f programs/roulette/Cargo.lock
+          anchor build --no-idl
+          test -f target/deploy/roulette.so || { echo "roulette.so missing" >&2; exit 1; }
+          ls -la target/deploy/
+
+      - name: Deploy to devnet (deterministic program address)
+        run: |
+          solana program deploy target/deploy/roulette.so \
+            --program-id target/deploy/roulette-keypair.json \
+            --keypair ~/.config/solana/id.json \
+            --url https://api.devnet.solana.com \
+            --output json
+          solana program show "$PROGRAM_ID"
 
       - name: Initialize on-chain config
-        run: npx tsx scripts/seed-config.ts
+        run: |
+          npm install --no-save tsx >/dev/null 2>&1
+          npx tsx scripts/seed-config.ts
         env:
           SOLANA_RPC_URL: https://api.devnet.solana.com
           OPERATOR_KEYPAIR: ${{ secrets.OPERATOR_KEYPAIR }}
@@ -98,3 +123,4 @@ jobs:
         run: |
           echo "DEPLOYED PROGRAM ID: $PROGRAM_ID"
           solana program show "$PROGRAM_ID"
+          solana account "$PROGRAM_ID" --url https://api.devnet.solana.com || true
