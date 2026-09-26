@@ -15,8 +15,16 @@ pub const PARTICIPANT_SPACE: usize = 101;
 /// Anchor space: 8 disc + 8 id + 1 status + 32 escrow + 8 pot + 16 total_weight
 /// + 4 participant_count + 8 lock_slot + 8 reveal_slot + 2 fee_bps + 32 randomness
 /// + 16 winning_ticket + 32 winner + 8 fee_lamports + 8 payout_lamports
-/// + 32 payout_account + 1 tier + 1 bump
-pub const ROUND_SPACE: usize = 8 + 8 + 1 + 32 + 8 + 16 + 4 + 8 + 8 + 2 + 32 + 16 + 32 + 8 + 8 + 32 + 1 + 1; // 225
+/// + 32 payout_account + 1 tier + 1 bump + 32 reveal_input
+///
+/// `reveal_input` is APPENDED last so every pre-existing field offset is
+/// unchanged; the persisted entropy input therefore starts at byte 225.
+pub const ROUND_SPACE: usize = 8 + 8 + 1 + 32 + 8 + 16 + 4 + 8 + 8 + 2 + 32 + 16 + 32 + 8 + 8 + 32 + 1 + 1 + 32; // 257
+
+/// Byte offset of `Round::reveal_input` inside the account data (8-byte
+/// discriminator + every field declared before it). Exposed so the off-chain
+/// decoders and the Anchor test assert the same layout as this program.
+pub const REVEAL_INPUT_OFFSET: usize = 225;
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[repr(u8)]
@@ -78,6 +86,16 @@ pub struct Round {
     /// Set once at create_round and never mutated.
     pub tier: u8,
     pub bump: u8,
+    /// The EXACT entropy input `settle_round` fed to `derive_randomness`:
+    /// the `SlotHashes` entry for `reveal_slot`.
+    ///
+    /// This value is read from the sysvar BY THE PROGRAM and written here, so
+    /// it is never user- or API-supplied. It is persisted because the
+    /// SlotHashes sysvar stores per-slot BANK hashes, which the RPC does not
+    /// expose through `getBlock(slot).blockhash` — the outcome is only
+    /// independently recomputable from this field, never by re-fetching the
+    /// slot from a node. Zero until `settle_round` runs.
+    pub reveal_input: [u8; 32],
 }
 
 #[account]
