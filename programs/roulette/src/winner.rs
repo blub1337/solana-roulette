@@ -2,6 +2,7 @@
 //! Mirrored exactly by packages/verification/src/winner.ts (property-tested).
 
 use crate::errors::RouletteError;
+use crate::state::PARTICIPANT_SPACE;
 use anchor_lang::prelude::*;
 use sha2::{Digest, Sha256};
 
