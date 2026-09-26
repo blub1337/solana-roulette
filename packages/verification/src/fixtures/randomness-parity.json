@@ -1,0 +1,48 @@
+{
+  "_comment": "Parity vectors pinning SHA256(\"roulette:reveal\" || round_id_le_u64 || reveal_input) across the Rust program (winner.rs::derive_randomness), the Node server twin (winner.ts) and the browser twin (winner.browser.ts). The on-chain vector was read straight from the devnet RPC after settle_round, so it pins the twins to what the DEPLOYED PROGRAM actually computes. Consumed by packages/verification/src/randomnessParity.test.ts and programs/roulette/tests/randomness_parity.rs.",
+  "formula": "randomness = SHA256( \"roulette:reveal\" || round_id.to_le_bytes() || reveal_input[32] )",
+  "vectors": [
+    {
+      "label": "devnet round 13 — real settle_round, SlotHashes entry for reveal_slot (SOURCE OF TRUTH: read off devnet RPC)",
+      "source": "on-chain",
+      "roundId": 13,
+      "revealInputHex": "856135714db6b917cf0675ee5d3901dcfd06c8ddaec4aff0e2caa942e74a54ec",
+      "randomnessHex": "7421ca052a5547e1732ba6fe2d8f55a518b2d1a0fa3348ac7445cd126a533380"
+    },
+    {
+      "label": "deterministic vector: all-zero input, round 0",
+      "source": "synthetic",
+      "roundId": 0,
+      "revealInputHex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "randomnessHex": "1c2ff983c30694fb367eb54c2e0349f0cf5e517dd1ec7869e6ef6968834758ce"
+    },
+    {
+      "label": "deterministic vector: all-ones input, round 42",
+      "source": "synthetic",
+      "roundId": 42,
+      "revealInputHex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "randomnessHex": "4b2f73d0288d970aebed37d02ab5c5d514805568a30e9e544d12c7b47a87c467"
+    },
+    {
+      "label": "deterministic vector: 0xab fill, round u64::MAX",
+      "source": "synthetic",
+      "roundId": "18446744073709551615",
+      "revealInputHex": "abababababababababababababababababababababababababababababababab",
+      "randomnessHex": "f8e7ac7a7e700f48964dcb97f3f027729cf1aed76b8a744cd213d9802ae41b78"
+    },
+    {
+      "label": "deterministic vector: small round id (LE byte order trap)",
+      "source": "synthetic",
+      "roundId": 1,
+      "revealInputHex": "0100000000000000000000000000000000000000000000000000000000000000",
+      "randomnessHex": "c2781c742993c8964875cf84feaa7312373e3ffef78b86a446bd388128a44fdd"
+    },
+    {
+      "label": "deterministic vector: 0x01 repeated (tag-boundary check)",
+      "source": "synthetic",
+      "roundId": 256,
+      "revealInputHex": "0101010101010101010101010101010101010101010101010101010101010101",
+      "randomnessHex": "7064e5e9ef5bc6417d2b9b03fa06dcdf24b2c5b10af53ab05e8ae4f1470d7706"
+    }
+  ]
+}
