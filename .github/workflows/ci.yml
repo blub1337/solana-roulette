@@ -28,10 +28,8 @@ jobs:
           sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       # Agave v2+ ships cargo-build-sbf as a cargo subcommand, not a binary.
-      - name: Install cargo-build-sbf
-        run: |
-          cargo install cargo-build-sbf --locked
-          cargo-build-sbf --version
+      - name: Install cargo-build-sbf (4.4.0)
+        run: cargo install cargo-build-sbf --version 4.4.0 --locked && cargo-build-sbf --version
       - name: Build program
         run: |
           rm -f programs/roulette/Cargo.lock
