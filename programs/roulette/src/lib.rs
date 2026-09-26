@@ -86,20 +86,14 @@ pub mod roulette {
             RouletteError::InvalidTier
         );
 
-        // Round PDA validation: seeds [ROUND_SEED, round_id_le], zero-init.
+        // Round PDA validation: seeds [ROUND_SEED, round_id_le]. `init` in the
+        // context guarantees freshness (allocation could not have existed),
+        // so only the arg→PDA seed match must be enforced here.
         let round_id_bytes = args.round_id.to_le_bytes();
         let (expected_round, round_bump) =
             Pubkey::find_program_address(&[ROUND_SEED, &round_id_bytes], &crate::ID);
         require!(
             ctx.accounts.round.key() == expected_round,
-            RouletteError::InvalidRoundStatus
-        );
-        require!(
-            ctx.accounts.round.data_len() == 0,
-            RouletteError::InvalidRoundStatus
-        );
-        require!(
-            ctx.accounts.round.owner == &system_program::ID,
             RouletteError::InvalidRoundStatus
         );
 
@@ -127,7 +121,7 @@ pub mod roulette {
             &crate::ID,
         )?;
 
-        // Initialize the Round account (zero-init'd via `zero` constraint).
+        // Initialize the Round account (allocated by `init` in the context).
         let round = &mut ctx.accounts.round;
         // Anchor's `zero` constraint already guarantees fresh allocation for a
         // program-owned account; writing every field keeps this explicit.
@@ -399,11 +393,13 @@ pub mod roulette {
             if data.len() < PARTICIPANT_SPACE {
                 return err!(RouletteError::InvalidParticipant);
             }
-            let p_round = Pubkey::try_from(&data[8..40])?;
+            let p_round = Pubkey::try_from(&data[8..40])
+                .map_err(|_| error!(RouletteError::InvalidParticipant))?;
             if p_round != round.key() {
                 return err!(RouletteError::InvalidParticipant);
             }
-            let p_wallet = Pubkey::try_from(&data[40..72])?;
+            let p_wallet = Pubkey::try_from(&data[40..72])
+                .map_err(|_| error!(RouletteError::InvalidParticipant))?;
             let amount = u64::from_le_bytes(data[72..80].try_into().unwrap());
             drop(data);
 
