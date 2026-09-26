@@ -149,7 +149,11 @@ jobs:
 
       - name: Initialize on-chain config
         run: |
+          # seed-config.ts imports @solana-roulette/verification + /sdk, which
+          # resolve to their dist/ builds — build the shared packages first or
+          # the step dies on "Cannot find module .../types/dist/index.js".
           npm install --no-save tsx >/dev/null 2>&1
+          npm run build:server
           npx tsx scripts/seed-config.ts
         env:
           SOLANA_RPC_URL: https://api.devnet.solana.com
