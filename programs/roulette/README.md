@@ -8,7 +8,7 @@ full account model, instruction set, state machine, and error codes.
 ```
 programs/roulette/
 ├── Cargo.toml
-├── Anchor.toml        (declare program id AAHBk1qbXCzsbiLe7TiXuZNTvNPVtovtC6NWk9tsi6EZ)
+├── Anchor.toml        (declare program id F5kuHXicGCRnnh9SbRvxshynXPyzgzbKK1UVgTg5UZos)
 ├── Xargo.toml
 └── src/
     ├── lib.rs         (declare_id!, instruction dispatch)
