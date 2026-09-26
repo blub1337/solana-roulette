@@ -9,13 +9,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Solana
-        uses: metadaoci/setup-solana-action@v1.2
-        with:
-          solana-version: "2.0.8"
-
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Solana CLI (Anza)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)" || \
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
       - name: Install Anchor (avm)
         run: |
@@ -52,8 +53,9 @@ jobs:
             solana airdrop 2 "$ADDR" || true
             sleep 15
           done
-          solana balance "$ADDR"
-          if [ "$(echo "$(solana balance "$ADDR" | awk '{print $1}') < 4" | bc)" = "1" ]; then
+          FINAL=$(solana balance "$ADDR" | awk '{print $1}')
+          echo "final balance: $FINAL SOL"
+          if [ "$(echo "$FINAL < 4" | bc)" = "1" ]; then
             echo "NOT ENOUGH DEVNET SOL — top up manually at https://faucet.solana.com to $ADDR and re-run" >&2
             exit 1
           fi
@@ -64,19 +66,16 @@ jobs:
           KP=programs/roulette/target/deploy/roulette-keypair.json
           if [ -f "$KP" ]; then
             solana-keygen pubkey "$KP" || true
-            echo "existing deploy keypair found"
           else
             solana-keygen new --no-bip39-phrase --silent -o "$KP"
-            echo "new deterministic-on-rerun deploy keypair generated"
           fi
           PROGRAM_ID=$(solana-keygen pubkey "$KP")
           echo "PROGRAM_ID=$PROGRAM_ID" >> "$GITHUB_ENV"
           CURRENT=$(grep -o 'declare_id!("[^"]*")' programs/roulette/src/lib.rs | cut -d'"' -f2)
-          echo "program id on chain will be: $PROGRAM_ID (lib.rs currently: $CURRENT)"
+          echo "on-chain program id will be: $PROGRAM_ID (lib.rs has: $CURRENT)"
           if [ "$CURRENT" != "$PROGRAM_ID" ]; then
             sed -i "s/declare_id!(\"[^\"]*\")/declare_id!(\"$PROGRAM_ID\")/" programs/roulette/src/lib.rs
             grep -n 'declare_id!' programs/roulette/src/lib.rs
-            echo "lib.rs program id updated"
           fi
 
       - name: Build program
@@ -85,11 +84,10 @@ jobs:
       - name: Deploy to devnet
         run: |
           anchor deploy --provider.cluster https://api.devnet.solana.com
-          solana program show "$PROGRAM_ID" --output json || true
+          solana program show "$PROGRAM_ID" || true
 
       - name: Initialize on-chain config
-        run: |
-          npx tsx scripts/seed-config.ts
+        run: npx tsx scripts/seed-config.ts
         env:
           SOLANA_RPC_URL: https://api.devnet.solana.com
           OPERATOR_KEYPAIR: ${{ secrets.OPERATOR_KEYPAIR }}
@@ -98,5 +96,5 @@ jobs:
 
       - name: Output program ID
         run: |
-          echo "program id: $PROGRAM_ID"
+          echo "DEPLOYED PROGRAM ID: $PROGRAM_ID"
           solana program show "$PROGRAM_ID"
