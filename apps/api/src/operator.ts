@@ -153,7 +153,13 @@ export async function buildAndSendLifecycleTx(args: LifecycleTxArgs): Promise<Li
     } else if (action === "settle") {
       const feeWallet = requireFeeWallet(cfg);
       const roundKey = roundPda;
+      // remaining_accounts = Participant PDAs in index order — pick_winner
+      // walks them exactly as recorded by deposit (winner.rs pick_winner).
       const participants = await fetchParticipantsForRound(connection, programId, roundKey);
+      const participantPdas = participants
+        .slice()
+        .sort((a, b) => a.index - b.index)
+        .map((p) => getParticipantPda(programId, roundKey, p.wallet)[0]);
       tx.add(
         new TransactionInstruction({
           programId,
@@ -164,8 +170,9 @@ export async function buildAndSendLifecycleTx(args: LifecycleTxArgs): Promise<Li
             { pubkey: feeWallet, isSigner: false, isWritable: false },
             { pubkey: operator.publicKey, isSigner: true, isWritable: true },
             { pubkey: SLOT_HASHES, isSigner: false, isWritable: false },
-            ...participants.map((p) => ({
-              pubkey: p.wallet,
+            { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
+            ...participantPdas.map((pk) => ({
+              pubkey: pk,
               isSigner: false,
               isWritable: false,
             })),
@@ -196,13 +203,17 @@ export async function buildAndSendLifecycleTx(args: LifecycleTxArgs): Promise<Li
         })
       );
     } else {
-      // cancel: remaining_accounts are (Participant_i, wallet_i) pairs
+      // cancel: fixed accounts first (operator signer, system program), then
+      // remaining_accounts = (Participant_i, wallet_i) pairs — per lib.rs.
       const roundKey = roundPda;
       const participants = await fetchParticipantsForRound(connection, programId, roundKey);
-      const remaining = participants.flatMap((p) => [
-        { pubkey: getParticipantPda(programId, roundKey, p.wallet)[0], isSigner: false, isWritable: false },
-        { pubkey: p.wallet, isSigner: false, isWritable: true },
-      ]);
+      const remaining = participants
+        .slice()
+        .sort((a, b) => a.index - b.index)
+        .flatMap((p) => [
+          { pubkey: getParticipantPda(programId, roundKey, p.wallet)[0], isSigner: false, isWritable: false },
+          { pubkey: p.wallet, isSigner: false, isWritable: true },
+        ]);
       tx.add(
         new TransactionInstruction({
           programId,
@@ -210,9 +221,9 @@ export async function buildAndSendLifecycleTx(args: LifecycleTxArgs): Promise<Li
             { pubkey: configPda, isSigner: false, isWritable: false },
             { pubkey: roundPda, isSigner: false, isWritable: true },
             { pubkey: escrowPda, isSigner: false, isWritable: true },
-            ...remaining,
             { pubkey: operator.publicKey, isSigner: true, isWritable: true },
             { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
+            ...remaining,
           ],
           data: disc("cancel_round"),
         })
