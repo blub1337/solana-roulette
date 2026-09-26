@@ -193,8 +193,10 @@ pub struct LockRound<'info> {
     /// CHECK: seeds validated; listed for consistency (no lamport movement).
     #[account(seeds = [ESCROW_SEED, round.key().as_ref()], bump)]
     pub escrow: AccountInfo<'info>,
+    /// Fee payer. PERMISSIONLESS: `lock_round` writes only values read from
+    /// `config` plus `Clock::get()`, so any signer produces identical state.
     #[account(mut)]
-    pub operator: Signer<'info>,
+    pub payer: Signer<'info>,
 }
 
 #[derive(Accounts)]
@@ -208,9 +210,20 @@ pub struct SettleRound<'info> {
     pub escrow: AccountInfo<'info>,
     /// CHECK: must equal config.treasury; validated in lib.rs (no write here).
     pub treasury: AccountInfo<'info>,
+    /// Fee payer. PERMISSIONLESS: every value this instruction writes is a
+    /// pure function of accounts the program itself validates, so any signer
+    /// reproduces byte-identical state.
     #[account(mut)]
-    pub operator: Signer<'info>,
-    /// CHECK: SlotHashes sysvar; layout + membership checked in winner.rs.
+    pub payer: Signer<'info>,
+    /// SlotHashes sysvar — the entropy source.
+    ///
+    /// SECURITY: the `address =` constraint is mandatory, not cosmetic. A bare
+    /// `AccountInfo` is attacker-supplied, and `extract_slot_hash` happily
+    /// parses whatever bytes it holds; without this pin a permissionless caller
+    /// could pass a PDA they own containing `(reveal_slot, hash_of_their_choosing)`
+    /// and pick the winner. While `settle_round` was operator-gated this was
+    /// masked by trust in the operator; opening it up makes the pin load-bearing.
+    #[account(address = anchor_lang::solana_program::sysvar::slot_hashes::ID)]
     pub slot_hashes: AccountInfo<'info>,
     pub system_program: Program<'info, System>,
 }
@@ -230,8 +243,10 @@ pub struct PayWinners<'info> {
     /// CHECK: must equal config.treasury (platform fee wallet); receives 7.5%.
     #[account(mut)]
     pub treasury: AccountInfo<'info>,
+    /// Fee payer. PERMISSIONLESS: every account and amount is pinned by state
+    /// frozen in `settle_round`, so any signer pays exactly the frozen split.
     #[account(mut)]
-    pub operator: Signer<'info>,
+    pub payer: Signer<'info>,
     pub system_program: Program<'info, System>,
 }
 
@@ -244,6 +259,9 @@ pub struct CancelRound<'info> {
     /// CHECK: seeds validated; source of refunds.
     #[account(mut, seeds = [ESCROW_SEED, round.key().as_ref()], bump)]
     pub escrow: AccountInfo<'info>,
+    /// The ONLY remaining operator-gated instruction. Refunds are exact, so
+    /// this is not a theft vector, but a permissionless cancel would let
+    /// anyone front-run settlement of a healthy FULL round and kill the pot.
     #[account(mut)]
     pub operator: Signer<'info>,
     pub system_program: Program<'info, System>,
