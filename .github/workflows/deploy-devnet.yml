@@ -31,9 +31,11 @@ jobs:
       # Agave v2+ no longer ships cargo-build-sbf in the release tarball; it is
       # now a cargo subcommand. anchor's CLI wrapper only shelled out to it —
       # build directly instead (no anchor binary needed).
-      - name: Install cargo-build-sbf
+      - name: Install cargo-build-sbf (4.4.0)
         run: |
-          cargo install cargo-build-sbf --locked
+          # Pinned: must match the Agave 4.x runtime/loader expectations; an
+          # older subcommand (4.1.0) produced an ELF the devnet loader rejects.
+          cargo install cargo-build-sbf --version 4.4.0 --locked
           cargo-build-sbf --version
 
       - name: Show toolchain
