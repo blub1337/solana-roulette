@@ -6,6 +6,8 @@
 - Publicly verifiable from chain data alone (`packages/verification`).
 - Unknowable before betting closes: no participant can compute the winner pre-lock.
 - Pluggable: a real VRF oracle must be installable for mainnet without redesign.
+  (`reveal_input` already carries the 32-byte pre-image, so a provider swap
+  changes only how those bytes are obtained — see §3.)
 
 ## 2. DEVNET adapter (default): committed future blockhash
 
@@ -82,14 +84,54 @@ above.
 
 ### Devnet-only trust assumptions (READ THIS)
 
-- **Operator denial-of-service:** the operator signs settlement; refusing to settle
-  stalls payout (funds remain locked in escrow; `cancel_round` refunds).
-- **Operator grind/retry:** by cancelling and re-creating rounds, a malicious operator
-  can search for favorable blockhash alignment. Mitigation on mainnet = real VRF.
+- **Operator denial-of-service: RESOLVED (B2).** `lock_round`, `settle_round` and
+  `pay_winners` are permissionless — see §2.3. The operator can no longer stall a
+  payout. `cancel_round` remains operator-gated, but it grants no fund-holding
+  power: a FULL round can always be settled and paid by anyone.
+- **Operator grind/retry: REDUCED, not eliminated.** Permissionless `lock_round`
+  means anyone (including a competitor) can lock the instant a round goes FULL,
+  so the operator can no longer *choose* the reveal slot. They can still refuse
+  to lock, and the underlying blockhash entropy is still validator-influenced.
+  Only a real VRF removes this class of risk — §3.
 - **Multi-block reorgs on devnet** are practically irrelevant at 32-slot offsets.
 
 **This adapter is explicitly NOT production-safe and is labeled `devnet-only` in code.
 The config surfaces this to the UI, which displays a persistent DEVNET banner.**
+
+## 2.3 Settlement is permissionless (B2)
+
+`lock_round`, `settle_round` and `pay_winners` are signed by an arbitrary
+fee payer, **not** the configured operator. This is safe because every value
+each instruction writes is a pure function of state the program validates
+itself — the signer's identity cannot change the outcome:
+
+| Instruction | What the caller cannot influence |
+|---|---|
+| `lock_round` | Everything written is read from the seed-validated `config` PDA (`reveal_offset`, `fee_bps`) or from `Clock::get()`. The only caller input is *when*, and letting anyone lock the moment a round goes FULL **removes** the operator's slot-picking discretion rather than granting one. |
+| `settle_round` | Entropy comes from `slot_hashes`, address-pinned to the real sysvar. The winner comes from `pick_winner`, which rejects any participant list that is not the canonical index-ordered weight chain and requires `count == participant_count` — so entries cannot be substituted, reordered, truncated or padded. Fee and payout come from the **frozen** `fee_bps` / `pot`, and `treasury` must equal `config.treasury`. |
+| `pay_winners` | `winner_account` must equal the `round.winner` frozen in phase 1, `treasury` must equal `config.treasury`, and both amounts are the frozen `payout_lamports` / `fee_lamports`. The caller supplies no amount and no recipient that is not already pinned on-chain. All three instructions are argument-free. |
+
+`cancel_round` **deliberately stays operator-gated.** Refunds are exact, so it is
+not a theft vector — but a permissionless cancel would let anyone front-run
+settlement of a healthy FULL round, destroy the pot and kill the fee. Removing
+that gate safely needs a timeout (refund only once the round is provably
+unsettleable), which is a larger state change than B2 allows.
+
+### 2.3.1 The sysvar pin is load-bearing
+
+`SettleRound::slot_hashes` carries
+`#[account(address = anchor_lang::solana_program::sysvar::slot_hashes::ID)]`.
+
+This is not cosmetic. A bare `AccountInfo` is attacker-supplied and
+`extract_slot_hash` parses whatever bytes it is handed. While `settle_round` was
+operator-gated the hole was masked by trust in the operator; opening the gate
+would have turned it into a **winner-picking bug** — a caller could pass a PDA
+they own containing `(reveal_slot, hash_of_their_choosing)` and settle any round
+to any winner. The pin is the reason permissionless settle is safe.
+
+Guarded by `programs/roulette/tests/settlement_authority.rs` (CI-enforced) and
+attempted live against devnet by
+`scripts/devnet-permissionless-settle-e2e.ts`.
 
 ## 2.1 Devnet ledger adapter (runtime `mode: "local"`)
 
@@ -121,26 +163,83 @@ Trust assumptions: the process holds the secret in memory, so a hostile host
 could subvert it. That is acceptable for a devnet simulation and is another
 reason the ledger is refused on mainnet. **It is not a substitute for a VRF.**
 
-## 3. VRF interface (mainnet path)
+## 3. VRF provider assessment (mainnet path)
 
-```rust
-pub trait RandomnessProvider {
-    /// Commit at lock time; returns anything to store on the Round account.
-    fn commit(ctx: &Context<...>) -> Result<RandomnessCommitment>;
-    /// Reveal at settle; returns 32 bytes of entropy or errors if not ready.
-    fn reveal(ctx: &Context<...>, commitment: &RandomnessCommitment) -> Result<[u8; 32]>;
-}
+**Status: NOT INTEGRATED. The current entropy remains devnet-only and must not be
+treated as production-grade.** This section records the provider survey so the
+next task starts from facts rather than a shortlist.
+
+The winner-selection math (`randomness % total_weight → cumulative ranges`) is
+provider-agnostic: only entropy sourcing changes, and `packages/verification`
+reads the round's `randomness` field, so verification code never needs to know
+the provider. `reveal_input` (32 bytes) already holds exactly the pre-image a
+VRF provider would need persisted, so **B1 verifiability survives a provider
+swap** — the persisted entropy is just "32 bytes the program committed to
+before the draw".
+
+| Provider | Verdict | Why |
+|---|---|---|
+| **Switchboard VRF** | ❌ **DEAD — do not integrate** | Switchboard announced shutdown on 2026-09-19 and **ceased all operations on 2026-09-25** (yesterday), after a suspected key compromise on 2026-08-29. Its own integration guides are now marked "for historic educational purposes only". Its SDK also required `anchor-lang 0.32.1`, incompatible with this program. Any plan naming Switchboard is already stale. |
+| **ORAO VRF** (`orao-solana-vrf-cb`) | ⚠️ **blocked by Anchor version** | Alive and well (v0.4.0, Jan 2026, callback-CPI model, ~0.001 SOL/request). But **every published version requires `anchor-lang >= 0.31`** (0.2.0→^0.31.0, 0.3.3→^0.31.1, 0.4.0→^0.32.1) and this program is on **0.30.1**. Integrating it forces a program-wide Anchor upgrade of a deployed, money-moving program. |
+| **MagicBlock SolanaVrf** (`ephemeral-vrf-sdk` 0.3.0) | ✅ **best candidate — needs a scoped spike** | Alive, open source, audited (Zenith, 2025-08-06), RFC 9381 with on-chain Ristretto/Schnorr proof verification, and `anchor-lang >=0.28.0, <1.0.0` so it is version-compatible with 0.30.1. Its VRF program and `DEFAULT_QUEUE` were confirmed **live on devnet** during this assessment. Unverified: whether a funded oracle is actually fulfilling devnet requests, program size/compute impact, and the `anchor` vs `anchor-compat` feature choice. |
+
+### 3.1 What a MagicBlock integration would require
+
+The flow maps onto the desired state machine with no change to the escrow,
+fee, tier or winner-selection logic:
+
+```
+OPEN → FULL → LOCKED → RANDOMNESS_REQUESTED   (lock_round: request_vrf CPI,
+                                               record the request/queue state)
+           → RANDOMNESS_VERIFIED              (callback invoked BY the VRF
+                                               program after it verifies the
+                                               proof on-chain; only the VRF
+                                               program can produce the
+                                               VRF_PROGRAM_IDENTITY signer)
+           → WINNER DETERMINED                (same derive → ticket → cumulative
+                                               walk as today)
+           → PAYOUT → COMPLETED → NEXT ROUND  (pay_winners already permissionless)
 ```
 
-Current implementation: `SlotHashProvider` (devnet-only). Planned mainnet implementations:
+- **Provider:** MagicBlock SolanaVrf, program `Vrf1RNUjXmQGjmQrQLvJHs9SNkvDJEsRVFPkfSQUwGz`.
+- **Accounts:** an `oracle_queue` pinned to `DEFAULT_QUEUE`
+  (`Cuj97ggrhhidhbu39TijNVqE74xvKJ69gDervRUXAxGh`, live on devnet) on the
+  request; a `vrf_program_identity` (`Signer`, address-pinned) on the callback;
+  the `Round` PDA passed as a writable remaining account.
+- **Who pays:** the lock-time payer, per request, in SOL. Currently a fixed
+  cost the platform absorbs; a per-round fee would change the 7.5% economics
+  and is out of scope.
+- **Callback/fulfillment:** the VRF program verifies the proof and CPIs the
+  callback. The callback must be written so it can never fail (a failing
+  callback is client misbehaviour, and the oracle eventually fulfils *without*
+  calling back after `callback_deadline`).
+- **How the program verifies the result:** it does not verify a proof itself —
+  the VRF program does, and the callback's `VRF_PROGRAM_IDENTITY` signer check
+  is what makes that trustworthy. This is a different trust model from
+  Switchboard's in-program `get_value()`.
+- **How the winner is derived:** unchanged. The 32 callback bytes replace the
+  `SlotHashes` read.
+- **How the result is persisted:** write the 32 VRF bytes to `round.reveal_input`
+  at callback time (the field already exists and is already exposed by the API
+  and `/api/round/:id/verify`), so independent verification keeps working.
+- **How the API verifies it:** unchanged — it reads `reveal_input` and
+  recomputes entropy → ticket → winner → fee → payout.
 
-- **Switchboard VRF v2 / `RandomnessAccountData`** — cost per request, industry standard.
-- **Chainlink VRF on Solana** (when available).
-- **Orao VRF**.
+### 3.2 Open questions blocking that integration
 
-The winner-selection math (`randomness % total_weight → cumulative ranges`) is identical
-for every provider; only entropy sourcing changes. `packages/verification` reads the
-round's `randomness` field, so verification code never needs to know the provider.
+1. Is a funded oracle fulfilling devnet requests in `DEFAULT_QUEUE` right now?
+   A request that is never fulfilled cannot be demonstrated, and a mock is not
+   acceptable.
+2. Program size / compute budget impact of pulling in `ephemeral-vrf-sdk`.
+3. Whether the `anchor` feature (→ `anchor-modern` → recent `anchor-lang`)
+   or `anchor-compat` is required to stay on 0.30.1.
+4. Callback CU: the existing `pick_winner` walks every participant, and a
+   callback that can fail is a liveness bug.
+
+None of these can be answered without a real build and a real devnet request,
+which is a separate, explicitly-scoped task. Until then the honest position is:
+**the operator dependency is removed (B2 partial), the entropy source is still
+devnet-only, and Mainnet is blocked on a real VRF integration.**
 
 ## 4. Why not commit-reveal by users?
 
