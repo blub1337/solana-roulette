@@ -11,11 +11,15 @@ url = "https://api.apr.dev"
 cluster = "Devnet"
 wallet = "~/.config/solana/id.json"
 
+# Deterministic deploy keypair derived from OPERATOR_KEYPAIR_B64
+# (nacl.sign.keyPair.fromSeed(sha256("roulette-deploy-v1:" + b64))).
+# The matching keypair file is written to
+# programs/roulette/target/deploy/roulette-keypair.json by deploy-devnet.yml.
 [programs.devnet]
-roulette = "AAHBk1qbXCzsbiLe7TiXuZNTvNPVtovtC6NWk9tsi6EZ"
+roulette = "F5kuHXicGCRnnh9SbRvxshynXPyzgzbKK1UVgTg5UZos"
 
 [programs.localnet]
-roulette = "AAHBk1qbXCzsbiLe7TiXuZNTvNPVtovtC6NWk9tsi6EZ"
+roulette = "F5kuHXicGCRnnh9SbRvxshynXPyzgzbKK1UVgTg5UZos"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.anchor.json -t 1000000 programs/roulette/tests/**/*.ts"
