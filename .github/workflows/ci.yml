@@ -21,7 +21,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # cargo 1.83+ writes lockfile v4 by default — breaks the 1.18 SBF cargo.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.82.0
       - name: Setup Solana CLI (Anza, 1.18.17)
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v1.18.17/install)"
