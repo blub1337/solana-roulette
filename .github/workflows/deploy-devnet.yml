@@ -13,21 +13,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Pinned to 1.82: cargo 1.83+ writes lockfile v4 by default, which the
-      # 1.18 SBF toolchain cannot parse. Anchor's host `cargo metadata` pass
-      # (re)writes programs/roulette/Cargo.lock before cargo-build-sbf runs.
-      - name: Setup Rust (1.82)
+      # ALL-MODERN toolchain: 2026 crates.io resolution produces manifests that
+      # only cargo >= 1.85 can parse AND lockfile v4 — so the host cargo and the
+      # SBF platform-tools cargo must BOTH be modern (old 1.18.x platform-tools
+      # fails on both). Anchor's CLI stays 0.30.x; anchor-lang 0.30.1 builds
+      # fine with a modern rustc.
+      - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.82.0
 
-      # Pinned to 1.18.17: Anchor 0.30.1 defaults to this version for the SBF
-      # build, so the BPF toolchain's cargo and any host cargo must agree on
-      # Cargo.lock (v4 locks break the 1.18 cargo).
-      - name: Setup Solana CLI (Anza, 1.18.17)
+      - name: Setup Solana CLI (Anza stable)
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v1.18.17/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)" || \
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          cargo-build-sbf --version || cargo-build-bpf --version || true
 
       # Prebuilt CLI binary (anchor v0.30.1 ships no release assets; v0.30.2
       # does — same 1.18.x SBF toolchain line). The program itself uses
@@ -112,9 +111,8 @@ jobs:
           fi
           grep -n "$PROGRAM_ID" Anchor.toml || { echo "Anchor.toml program id mismatch" >&2; exit 1; }
 
-      # The host-cargo IDL pass rewrites programs/roulette/Cargo.lock to
-      # lockfile v4, which the 1.18 SBF cargo cannot parse (-Znext-lockfile-bump
-      # error in CI run 36206893044). Drop the lock and skip IDL generation.
+      # Fresh resolution each run: no lockfile is committed, and a stale one
+      # could pin old crates that no longer parse. --no-idl skips the IDL pass.
       - name: Build program
         run: |
           rm -f programs/roulette/Cargo.lock
