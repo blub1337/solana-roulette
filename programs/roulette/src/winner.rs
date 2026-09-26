@@ -51,9 +51,12 @@ pub fn pick_winner(
         if data[0..8] != participant_discriminator() {
             return err!(RouletteError::InvalidParticipant);
         }
-        let p_round = Pubkey::try_from(&data[8..40])?;
+        // try_into().unwrap() is safe: the slices above are exactly 32 bytes.
+        let p_round = Pubkey::try_from(&data[8..40])
+            .map_err(|_| error!(RouletteError::InvalidParticipant))?;
         require!(p_round == round_key, RouletteError::InvalidParticipant);
-        let wallet = Pubkey::try_from(&data[40..72])?;
+        let wallet = Pubkey::try_from(&data[40..72])
+            .map_err(|_| error!(RouletteError::InvalidParticipant))?;
         let amount = u64::from_le_bytes(data[72..80].try_into().unwrap());
         let weight_start = u128::from_le_bytes(data[80..96].try_into().unwrap());
         let index = u32::from_le_bytes(data[96..100].try_into().unwrap());
