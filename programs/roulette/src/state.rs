@@ -12,6 +12,12 @@ pub const REVEAL_OFFSET_SLOTS: u64 = 32;
 /// Anchor space: 8 disc + 32 round + 32 wallet + 8 amount + 16 weight_start + 4 index + 1 bump
 pub const PARTICIPANT_SPACE: usize = 101;
 
+/// Anchor space: 8 disc + 8 id + 1 status + 32 escrow + 8 pot + 16 total_weight
+/// + 4 participant_count + 8 lock_slot + 8 reveal_slot + 2 fee_bps + 32 randomness
+/// + 16 winning_ticket + 32 winner + 8 fee_lamports + 8 payout_lamports
+/// + 32 payout_account + 1 tier + 1 bump
+pub const ROUND_SPACE: usize = 8 + 8 + 1 + 32 + 8 + 16 + 4 + 8 + 8 + 2 + 32 + 16 + 32 + 8 + 8 + 32 + 1 + 1; // 225
+
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
 #[repr(u8)]
 pub enum RoundStatus {
@@ -121,10 +127,15 @@ pub struct CreateRound<'info> {
     /// CHECK: manual PDA validation in lib.rs.
     #[account(mut)]
     pub config: Account<'info, GlobalConfig>,
-    /// CHECK: manual PDA validation (seeds [ROUND_SEED, round_id_le]) in lib.rs.
-    #[account(zero)]
-    pub round: UncheckedAccount<'info>,
-    /// CHECK: manual seed validation in lib.rs.
+    /// Round PDA: allocated and rent-paid by the operator THIS instruction.
+    /// Anchor 0.30 cannot use instruction args in `seeds =`, so the arg-derived
+    /// seed match (args.round_id → PDA) is enforced in lib.rs right after the
+    /// context resolves; `init` then guarantees the account is fresh and
+    /// program-owned before any field is written.
+    #[account(init, payer = operator, space = ROUND_SPACE)]
+    pub round: Account<'info, Round>,
+    /// CHECK: manual seed validation in lib.rs; funded via system CPI there.
+    #[account(mut)]
     pub escrow: UncheckedAccount<'info>,
     #[account(mut)]
     pub operator: Signer<'info>,
