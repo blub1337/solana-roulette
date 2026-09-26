@@ -29,7 +29,23 @@ export const ROUND_SPACE =
   8 + // payout_lamports
   32 + // payout_account (frozen winner pubkey at settle phase 1)
   1 + // tier
-  1; // bump
+  1 + // bump
+  32; // reveal_input (entropy input persisted by settle_round)
+
+/**
+ * Byte offset of `reveal_input` inside the Round account. Mirrors
+ * `state.rs::REVEAL_INPUT_OFFSET`; `reveal_input` is declared last in the Rust
+ * struct precisely so this offset is a pure append and every earlier field
+ * offset is unchanged.
+ */
+export const REVEAL_INPUT_OFFSET = 225;
+
+/**
+ * Size of pre-`reveal_input` rounds (the layout deployed before entropy inputs
+ * were persisted). Such accounts still decode, with `revealInput` reported as
+ * 32 zero bytes so callers can detect that nothing was recorded.
+ */
+export const LEGACY_ROUND_SPACE = 225;
 export const PARTICIPANT_SPACE = 8 + 32 + 32 + 8 + 16 + 4 + 1; // 101
 
 export class AccountDecodeError extends Error {
@@ -74,6 +90,17 @@ export interface RoundData {
   /** Pool lane (index into GlobalConfig.tier_caps): 0=1 SOL, 1=10 SOL, 2=100 SOL. */
   tier: number;
   bump: number;
+  /**
+   * The exact entropy input `settle_round` hashed — the `SlotHashes` entry for
+   * `revealSlot`, written BY THE PROGRAM. All-zero until settle runs (and for
+   * rounds deployed before this field existed).
+   *
+   * This is the field that makes the outcome independently recomputable: the
+   * sysvar holds per-slot bank hashes, which no RPC exposes through
+   * `getBlock(slot).blockhash`, so the input can never be reconstructed from a
+   * node — it has to be read from the Round account.
+   */
+  revealInput: Uint8Array;
 }
 
 export interface ParticipantData {
@@ -159,7 +186,7 @@ export function decodeGlobalConfig(data: Uint8Array): GlobalConfigData {
 }
 
 export function decodeRound(data: Uint8Array): RoundData {
-  if (data.length < ROUND_SPACE) throw new AccountDecodeError("Round", "too short");
+  if (data.length < LEGACY_ROUND_SPACE) throw new AccountDecodeError("Round", "too short");
   const r = new Reader(data, DISCRIMINATOR_LEN);
   const id = r.u64();
   const statusByte = r.u8();
@@ -178,6 +205,11 @@ export function decodeRound(data: Uint8Array): RoundData {
   const payoutAccount = r.bytes(32);
   const tier = r.u8();
   const bump = r.u8();
+  // Appended field: absent on rounds created before the redeploy. Read it by
+  // absolute offset and tolerate a short buffer so legacy rounds stay readable
+  // (with an all-zero input, which verifyRoundData reports as "not recorded").
+  const revealInput =
+    data.length >= ROUND_SPACE ? data.slice(REVEAL_INPUT_OFFSET, REVEAL_INPUT_OFFSET + 32) : new Uint8Array(32);
   const status = ROUND_STATES[statusByte] as RoundState | undefined;
   if (!status) throw new AccountDecodeError("Round", `unknown status byte ${statusByte}`);
   return {
@@ -198,6 +230,7 @@ export function decodeRound(data: Uint8Array): RoundData {
     payoutAccount,
     tier,
     bump,
+    revealInput,
   };
 }
 
