@@ -35,6 +35,14 @@ jobs:
           rm -f programs/roulette/Cargo.lock
           cargo build-sbf --manifest-path programs/roulette/Cargo.toml --sbf-out-dir target/deploy
           test -f target/deploy/roulette.so || { echo "roulette.so missing" >&2; exit 1; }
+      # Real gate (no `|| true`): runs derive_randomness against the SAME
+      # fixture that pins the Node and browser twins, including a vector read
+      # off devnet from the deployed program. If Rust and TypeScript drift,
+      # this fails the build.
+      - name: Rust entropy parity test
+        run: |
+          cargo test --manifest-path programs/roulette/Cargo.toml \
+            --test randomness_parity -- --nocapture
       - name: Test program (localnet)
         run: anchor test --skip-build --skip-deploy || true
 
