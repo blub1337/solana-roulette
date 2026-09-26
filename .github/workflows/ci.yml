@@ -27,16 +27,16 @@ jobs:
           sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)" || \
           sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-      - name: Install Anchor CLI (0.30.2 prebuilt)
+      # Agave v2+ ships cargo-build-sbf as a cargo subcommand, not a binary.
+      - name: Install cargo-build-sbf
         run: |
-          curl -sfL -o /tmp/anchor https://github.com/coral-xyz/anchor/releases/download/v0.30.2/anchor-0.30.2-x86_64-unknown-linux-gnu
-          sudo install -m 0755 /tmp/anchor /usr/local/bin/anchor
-          anchor --version
+          cargo install cargo-build-sbf --locked
+          cargo-build-sbf --version
       - name: Build program
         run: |
-          # v4 Cargo.lock (host cargo) breaks the 1.18 SBF cargo; IDL pass rewrites it.
           rm -f programs/roulette/Cargo.lock
-          anchor build --no-idl
+          cargo build-sbf --manifest-path programs/roulette/Cargo.toml --sbf-out-dir target/deploy
+          test -f target/deploy/roulette.so || { echo "roulette.so missing" >&2; exit 1; }
       - name: Test program (localnet)
         run: anchor test --skip-build --skip-deploy || true
 
