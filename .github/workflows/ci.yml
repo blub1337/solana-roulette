@@ -22,14 +22,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Setup Solana CLI (Anza)
+      - name: Setup Solana CLI (Anza, 1.18.17)
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/v1.18.17/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - name: Install Anchor
         run: cargo install --git https://github.com/coral-xyz/anchor avm --locked && avm install 0.30.1 && avm use 0.30.1
       - name: Build program
-        run: anchor build
+        run: |
+          # v4 Cargo.lock (host cargo) breaks the 1.18 SBF cargo; IDL pass rewrites it.
+          rm -f programs/roulette/Cargo.lock
+          anchor build --no-idl
       - name: Test program (localnet)
         run: anchor test --skip-build --skip-deploy || true
 
