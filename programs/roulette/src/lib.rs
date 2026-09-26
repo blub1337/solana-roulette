@@ -130,8 +130,7 @@ pub mod roulette {
             &crate::ID,
         )?;
 
-        // Allocate the round account (program-owned, rent-paid by the operator)
-        // and stamp the Anchor discriminator, which `init` would normally do.
+        // Allocate the round account (program-owned, rent paid by the operator).
         let round_info = ctx.accounts.round.to_account_info();
         system_program::create_account(
             CpiContext::new_with_signer(
@@ -146,27 +145,33 @@ pub mod roulette {
             ROUND_SPACE as u64,
             &crate::ID,
         )?;
-        round_info.try_borrow_mut_data()?[..8].copy_from_slice(&Round::discriminator());
 
-        // Initialize the Round account (allocated just above).
-        let round = &mut Account::<Round>::try_from_unchecked(round_info, &crate::ID)?;
-        round.id = args.round_id;
-        round.tier = args.tier;
-        round.status = RoundStatus::Open;
-        round.escrow = expected_escrow;
-        round.pot = 0;
-        round.total_weight = 0;
-        round.participant_count = 0;
-        round.lock_slot = 0;
-        round.reveal_slot = 0;
-        round.fee_bps = ctx.accounts.config.fee_bps;
-        round.randomness = [0u8; 32];
-        round.winning_ticket = 0;
-        round.winner = Pubkey::default();
-        round.fee_lamports = 0;
-        round.payout_lamports = 0;
-        round.payout_account = Pubkey::default();
-        round.bump = round_bump;
+        // Initialize the freshly allocated Round. The account is built in place
+        // (rather than via `Account::try_from_unchecked`, whose `&'info
+        // AccountInfo<'info>` signature cannot be satisfied from a context
+        // field) and `try_to_vec` already emits the 8-byte Anchor
+        // discriminator, so a single write lays down the whole account.
+        let round = Round {
+            id: args.round_id,
+            status: RoundStatus::Open,
+            escrow: expected_escrow,
+            pot: 0,
+            total_weight: 0,
+            participant_count: 0,
+            lock_slot: 0,
+            reveal_slot: 0,
+            fee_bps: ctx.accounts.config.fee_bps,
+            randomness: [0u8; 32],
+            winning_ticket: 0,
+            winner: Pubkey::default(),
+            fee_lamports: 0,
+            payout_lamports: 0,
+            payout_account: Pubkey::default(),
+            tier: args.tier,
+            bump: round_bump,
+        };
+        let encoded = round.try_to_vec()?;
+        round_info.try_borrow_mut_data()?.copy_from_slice(&encoded);
 
         // Persist the counter AFTER all validations (create is the only writer).
         let config = &mut ctx.accounts.config;
