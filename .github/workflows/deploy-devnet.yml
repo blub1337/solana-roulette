@@ -6,6 +6,10 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      # Default cluster for every solana CLI command in this job — without it
+      # `solana balance`/`airdrop` silently target MAINNET and read 0 SOL.
+      SOLANA_URL: https://api.devnet.solana.com
     steps:
       - uses: actions/checkout@v4
 
@@ -53,16 +57,25 @@ jobs:
       - name: Fund wallet from devnet faucet (loop)
         run: |
           ADDR=$(solana-keygen pubkey ~/.config/solana/id.json)
+          RPC=https://api.devnet.solana.com
+          # Balance read straight from the devnet RPC (lamports) — immune to
+          # CLI default-cluster mistakes.
+          bal_lamports() {
+            curl -s "$RPC" -X POST -H "Content-Type: application/json" \
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBalance\",\"params\":[\"$ADDR\"]}" \
+              | grep -o '"value":[0-9]*' | head -1 | cut -d: -f2
+          }
           for i in 1 2 3 4 5 6 7 8; do
-            BAL=$(solana balance "$ADDR" | awk '{print $1}')
-            if [ "$(echo "$BAL >= 4" | bc)" = "1" ]; then echo "funded: $BAL SOL"; break; fi
+            B=$(bal_lamports)
+            echo "devnet balance: ${B:-0} lamports"
+            if [ "${B:-0}" -ge 4000000000 ]; then echo "funded: $B lamports"; break; fi
             echo "airdrop attempt $i..."
-            solana airdrop 2 "$ADDR" || true
+            solana airdrop 2 "$ADDR" --url "$RPC" || true
             sleep 15
           done
-          FINAL=$(solana balance "$ADDR" | awk '{print $1}')
-          echo "final balance: $FINAL SOL"
-          if [ "$(echo "$FINAL < 4" | bc)" = "1" ]; then
+          FINAL=$(bal_lamports)
+          echo "final devnet balance: ${FINAL:-0} lamports"
+          if [ "${FINAL:-0}" -lt 4000000000 ]; then
             echo "NOT ENOUGH DEVNET SOL — top up manually at https://faucet.solana.com to $ADDR and re-run" >&2
             exit 1
           fi
