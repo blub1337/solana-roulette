@@ -22,6 +22,26 @@ pub use errors::*;
 pub use state::*;
 pub use winner::*;
 
+/// Move `amount` lamports from `from` to `to`.
+///
+/// Deliberately NOT a System Program `transfer` CPI: the round escrow is owned
+/// by THIS program (created in create_round with `owner = crate::ID`), and the
+/// System Program refuses to debit an account it does not own ("instruction
+/// spent from the balance of an account it does not own"). A program may debit
+/// and credit lamports on accounts it owns directly, so settlement does that,
+/// with checked arithmetic on both sides.
+fn move_lamports(from: &AccountInfo, to: &AccountInfo, amount: u64) -> Result<()> {
+    let mut from_lamports = from.try_borrow_mut_lamports()?;
+    let mut to_lamports = to.try_borrow_mut_lamports()?;
+    **from_lamports = (*from_lamports)
+        .checked_sub(amount)
+        .ok_or(RouletteError::ArithmeticOverflow)?;
+    **to_lamports = (*to_lamports)
+        .checked_add(amount)
+        .ok_or(RouletteError::ArithmeticOverflow)?;
+    Ok(())
+}
+
 declare_id!("AAHBk1qbXCzsbiLe7TiXuZNTvNPVtovtC6NWk9tsi6EZ");
 
 #[program]
@@ -370,35 +390,20 @@ pub mod roulette {
 
         // Escrow PDA seeds are [ESCROW_SEED, round_key, bump] — see the
         // derivation in create_round. Seeding with the escrow's OWN key here
-        // (a circular derivation) makes invoke_signed fail with "Provided
-        // seeds do not result in a valid address", which blocked every payout.
-        let escrow_bump = ctx.bumps.escrow;
-        let round_key = round.key();
-        let escrow_seeds: &[&[&[u8]]] = &[&[ESCROW_SEED, round_key.as_ref(), &[escrow_bump]]];
+        // (a circular derivation) made invoke_signed fail with "Provided seeds
+        // do not result in a valid address", which blocked every payout.
+        // Settlement no longer signs at all: it moves lamports directly.
 
-        // 92.5% to the verified winner.
-        system_program::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: ctx.accounts.escrow.to_account_info(),
-                    to: ctx.accounts.winner_account.to_account_info(),
-                },
-                escrow_seeds,
-            ),
+        // 92.5% to the verified winner, 7.5% to the platform fee wallet.
+        // Both move lamports out of the program-owned escrow (see move_lamports).
+        move_lamports(
+            &ctx.accounts.escrow.to_account_info(),
+            &ctx.accounts.winner_account.to_account_info(),
             round.payout_lamports,
         )?;
-
-        // 7.5% to the platform fee wallet.
-        system_program::transfer(
-            CpiContext::new_with_signer(
-                ctx.accounts.system_program.to_account_info(),
-                system_program::Transfer {
-                    from: ctx.accounts.escrow.to_account_info(),
-                    to: ctx.accounts.treasury.to_account_info(),
-                },
-                escrow_seeds,
-            ),
+        move_lamports(
+            &ctx.accounts.escrow.to_account_info(),
+            &ctx.accounts.treasury.to_account_info(),
             round.fee_lamports,
         )?;
 
@@ -422,9 +427,8 @@ pub mod roulette {
         require!(round.pot > 0, RouletteError::NothingToRefund);
 
         // Same escrow PDA seeds as pay_winners: [ESCROW_SEED, round_key, bump].
-        let escrow_bump = ctx.bumps.escrow;
-        let round_key = round.key();
-        let escrow_seeds: &[&[&[u8]]] = &[&[ESCROW_SEED, round_key.as_ref(), &[escrow_bump]]];
+        let _escrow_bump = ctx.bumps.escrow;
+        let _round_key = round.key();
 
         let pairs = ctx.remaining_accounts.chunks(2);
         for pair in pairs {
@@ -452,15 +456,9 @@ pub mod roulette {
             if amount == 0 {
                 continue;
             }
-            system_program::transfer(
-                CpiContext::new_with_signer(
-                    ctx.accounts.system_program.to_account_info(),
-                    system_program::Transfer {
-                        from: ctx.accounts.escrow.to_account_info(),
-                        to: wallet.to_account_info(),
-                    },
-                    escrow_seeds,
-                ),
+            move_lamports(
+                &ctx.accounts.escrow.to_account_info(),
+                wallet.to_account_info(),
                 amount,
             )?;
         }
