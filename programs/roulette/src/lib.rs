@@ -11,6 +11,8 @@
 
 use anchor_lang::prelude::*;
 use anchor_lang::system_program;
+// Needed for `Round::discriminator()` when the account is written by hand.
+use anchor_lang::Discriminator;
 
 pub mod errors;
 pub mod state;
@@ -170,7 +172,16 @@ pub mod roulette {
             tier: args.tier,
             bump: round_bump,
         };
-        let encoded = round.try_to_vec()?;
+        let encoded = {
+            // `try_to_vec` serialises the FIELDS only; the 8-byte Anchor
+            // discriminator is prepended by `Account::new`/`exit` in generated
+            // code, so build the full ROUND_SPACE-byte payload by hand.
+            let mut buf = Vec::with_capacity(ROUND_SPACE);
+            buf.extend_from_slice(&Round::discriminator());
+            buf.extend_from_slice(&round.try_to_vec()?);
+            require!(buf.len() == ROUND_SPACE, RouletteError::ArithmeticOverflow);
+            buf
+        };
         round_info.try_borrow_mut_data()?.copy_from_slice(&encoded);
 
         // Persist the counter AFTER all validations (create is the only writer).
