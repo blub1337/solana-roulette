@@ -25,6 +25,12 @@ export function roundToDto(round: RoundData, cfg: AppConfig): RoundSummary {
     payoutLamports: hasWinner ? round.payoutLamports.toString() : undefined,
     feeLamports: hasWinner ? round.feeLamports.toString() : undefined,
     randomnessHex: hasWinner ? Buffer.from(round.randomness).toString("hex") : undefined,
+    // The entropy input settle_round persisted — the value a third party needs
+    // to recompute the draw without trusting this server.
+    revealInputHex:
+      hasWinner && round.revealInput.length === 32 && round.revealInput.some((b) => b !== 0)
+        ? Buffer.from(round.revealInput).toString("hex")
+        : undefined,
     winningTicket: hasWinner ? round.winningTicket.toString() : undefined,
   };
 }
