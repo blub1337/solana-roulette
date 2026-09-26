@@ -164,5 +164,8 @@ jobs:
       - name: Output program ID
         run: |
           echo "DEPLOYED PROGRAM ID: $PROGRAM_ID"
-          solana program show "$PROGRAM_ID"
-          solana account "$PROGRAM_ID" --url https://api.devnet.solana.com || true
+          # Same reason as the deploy step: `solana program show` misreports an
+          # upgradeable program as missing, so read the account over RPC.
+          curl -s "$SOLANA_URL" -X POST -H 'Content-Type: application/json' \
+            -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$PROGRAM_ID\",{\"encoding\":\"base64\"}]}"
+          echo
