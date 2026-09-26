@@ -28,20 +28,18 @@ jobs:
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
           cargo-build-sbf --version || cargo-build-bpf --version || true
 
-      # Prebuilt CLI binary (anchor v0.30.1 ships no release assets; v0.30.2
-      # does — same 1.18.x SBF toolchain line). The program itself uses
-      # anchor-lang 0.30.1 from crates.io. Host rust stays pinned to 1.82 so
-      # any regenerated Cargo.lock stays v3 for the 1.18 SBF cargo.
-      - name: Install Anchor CLI (0.30.2 prebuilt)
+      # Agave v2+ no longer ships cargo-build-sbf in the release tarball; it is
+      # now a cargo subcommand. anchor's CLI wrapper only shelled out to it —
+      # build directly instead (no anchor binary needed).
+      - name: Install cargo-build-sbf
         run: |
-          curl -sfL -o /tmp/anchor https://github.com/coral-xyz/anchor/releases/download/v0.30.2/anchor-0.30.2-x86_64-unknown-linux-gnu
-          sudo install -m 0755 /tmp/anchor /usr/local/bin/anchor
-          anchor --version
+          cargo install cargo-build-sbf --locked
+          cargo-build-sbf --version
 
       - name: Show toolchain
         run: |
           solana --version
-          anchor --version
+          cargo-build-sbf --version
           node --version
 
       - name: Import operator keypair
@@ -112,11 +110,12 @@ jobs:
           grep -n "$PROGRAM_ID" Anchor.toml || { echo "Anchor.toml program id mismatch" >&2; exit 1; }
 
       # Fresh resolution each run: no lockfile is committed, and a stale one
-      # could pin old crates that no longer parse. --no-idl skips the IDL pass.
-      - name: Build program
+      # could pin old crates that no longer parse. cargo-build-sbf fetches the
+      # current platform-tools (modern SBF cargo) itself.
+      - name: Build program (cargo build-sbf)
         run: |
           rm -f programs/roulette/Cargo.lock
-          anchor build --no-idl
+          cargo build-sbf --manifest-path programs/roulette/Cargo.toml --sbf-out-dir target/deploy
           test -f target/deploy/roulette.so || { echo "roulette.so missing" >&2; exit 1; }
           ls -la target/deploy/
 
