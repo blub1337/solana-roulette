@@ -126,6 +126,12 @@ export interface RoundSummary {
   payoutLamports?: Lamports;
   feeLamports?: Lamports;
   randomnessHex?: string;
+  /**
+   * The exact entropy input the program hashed (the SlotHashes entry for
+   * `revealSlot`), persisted on-chain by `settle_round`. Recomputing
+   * randomness from this reproduces the draw exactly.
+   */
+  revealInputHex?: string;
   winningTicket?: string;
 }
 
@@ -143,9 +149,10 @@ export interface VerifyResult {
   roundId?: string;
   totalWeight?: string;
   participantCount?: number;
-  entropySource?: "recorded_randomness" | "recomputed_blockhash" | "unavailable";
+  entropySource?: "persisted_input" | "recorded_randomness" | "recomputed_blockhash" | "unavailable";
   randomnessHex?: string;
   revealBlockhash?: string;
+  revealInputHex?: string;
   ticket?: string;
   computedWinner?: string;
   recordedWinner?: string;
