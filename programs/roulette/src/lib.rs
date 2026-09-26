@@ -86,9 +86,9 @@ pub mod roulette {
             RouletteError::InvalidTier
         );
 
-        // Round PDA validation: seeds [ROUND_SEED, round_id_le]. `init` in the
-        // context guarantees freshness (allocation could not have existed),
-        // so only the arg→PDA seed match must be enforced here.
+        // Round PDA validation: seeds [ROUND_SEED, round_id_le]. The account is
+        // allocated by the signed create_account CPI further down, so only the
+        // arg→PDA seed match must be enforced here.
         let round_id_bytes = args.round_id.to_le_bytes();
         let (expected_round, round_bump) =
             Pubkey::find_program_address(&[ROUND_SEED, &round_id_bytes], &crate::ID);
@@ -106,25 +106,50 @@ pub mod roulette {
         );
 
         // Fund the escrow with rent-exempt minimum so payouts always clear.
+        //
+        // Both accounts are created HERE, signed for by the program. The round
+        // id arrives as an instruction ARG, and Anchor 0.30 cannot express
+        // arg-derived seeds in an `init` constraint, so the allocation cannot
+        // live in the context. A PDA may only be created by the program that
+        // derives it, which is exactly what `new_with_signer` does: the client
+        // passes `round` and `escrow` as plain writable accounts (never as
+        // signers) and the runtime honours the program's own signature.
         let rent = Rent::get()?;
         let escrow_funding = rent.minimum_balance(0);
         system_program::create_account(
-            CpiContext::new(
+            CpiContext::new_with_signer(
                 ctx.accounts.system_program.to_account_info(),
                 system_program::CreateAccount {
                     from: ctx.accounts.operator.to_account_info(),
                     to: ctx.accounts.escrow.to_account_info(),
                 },
+                &[&[ESCROW_SEED, expected_round.as_ref(), &[escrow_bump]]],
             ),
             escrow_funding,
             0,
             &crate::ID,
         )?;
 
-        // Initialize the Round account (allocated by `init` in the context).
-        let round = &mut ctx.accounts.round;
-        // Anchor's `zero` constraint already guarantees fresh allocation for a
-        // program-owned account; writing every field keeps this explicit.
+        // Allocate the round account (program-owned, rent-paid by the operator)
+        // and stamp the Anchor discriminator, which `init` would normally do.
+        let round_info = ctx.accounts.round.to_account_info();
+        system_program::create_account(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                system_program::CreateAccount {
+                    from: ctx.accounts.operator.to_account_info(),
+                    to: round_info.clone(),
+                },
+                &[&[ROUND_SEED, &round_id_bytes, &[round_bump]]],
+            ),
+            rent.minimum_balance(ROUND_SPACE),
+            ROUND_SPACE as u64,
+            &crate::ID,
+        )?;
+        round_info.try_borrow_mut_data()?[..8].copy_from_slice(&Round::discriminator());
+
+        // Initialize the Round account (allocated just above).
+        let round = &mut Account::<Round>::try_from_unchecked(round_info, &crate::ID)?;
         round.id = args.round_id;
         round.tier = args.tier;
         round.status = RoundStatus::Open;
@@ -149,7 +174,6 @@ pub mod roulette {
             .round_counter
             .checked_add(1)
             .ok_or(RouletteError::ArithmeticOverflow)?;
-        let _ = escrow_bump;
         Ok(())
     }
 
