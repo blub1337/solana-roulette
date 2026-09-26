@@ -368,9 +368,12 @@ pub mod roulette {
             RouletteError::InvalidTreasury
         );
 
-        let escrow_key = ctx.accounts.escrow.key();
+        // Escrow PDA seeds are [ESCROW_SEED, round_key, bump] — see the
+        // derivation in create_round. Seeding with the escrow's OWN key here
+        // (a circular derivation) makes invoke_signed fail with "Provided
+        // seeds do not result in a valid address", which blocked every payout.
         let escrow_bump = ctx.bumps.escrow;
-        let escrow_seeds: &[&[&[u8]]] = &[&[ESCROW_SEED, escrow_key.as_ref(), &[escrow_bump]]];
+        let escrow_seeds: &[&[&[u8]]] = &[&[ESCROW_SEED, round.key().as_ref(), &[escrow_bump]]];
 
         // 92.5% to the verified winner.
         system_program::transfer(
@@ -417,9 +420,9 @@ pub mod roulette {
         );
         require!(round.pot > 0, RouletteError::NothingToRefund);
 
-        let escrow_key = ctx.accounts.escrow.key();
+        // Same escrow PDA seeds as pay_winners: [ESCROW_SEED, round_key, bump].
         let escrow_bump = ctx.bumps.escrow;
-        let escrow_seeds: &[&[&[u8]]] = &[&[ESCROW_SEED, escrow_key.as_ref(), &[escrow_bump]]];
+        let escrow_seeds: &[&[&[u8]]] = &[&[ESCROW_SEED, round.key().as_ref(), &[escrow_bump]]];
 
         let pairs = ctx.remaining_accounts.chunks(2);
         for pair in pairs {
