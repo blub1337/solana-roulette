@@ -36,9 +36,11 @@ export interface VerificationOutcome {
     roundId: string;
     totalWeight: string;
     participantCount: number;
-    entropySource: "recorded_randomness" | "recomputed_blockhash" | "unavailable";
+    entropySource: "persisted_input" | "recorded_randomness" | "recomputed_blockhash" | "unavailable";
     randomnessHex?: string;
     revealBlockhash?: string;
+    /** The entropy input persisted on-chain by settle_round (hex), when present. */
+    revealInputHex?: string;
     ticket?: string;
     computedWinner?: string;
     recordedWinner?: string;
@@ -70,21 +72,49 @@ export async function verifyRoundData(round: RoundData, deps: VerifyDeps): Promi
   );
   add("weight_chain_sums_to_pot", totalWeight === round.totalWeight && totalWeight === round.pot, `pot=${round.pot}`);
 
-  // Entropy
+  // Entropy.
+  //
+  // Priority order matters. `revealInput` is the ONLY input that can be
+  // recomputed by a third party: the program hashed the SlotHashes entry for
+  // `revealSlot` (a per-slot bank hash), which no RPC exposes through
+  // `getBlock(slot).blockhash`. When the program persisted it, we re-derive the
+  // entropy from it and assert it equals the stored `randomness` — that check
+  // is what makes the draw auditable. The other two paths are legacy
+  // fallbacks for rounds settled before the field existed.
   let entropy: Uint8Array | null = null;
   let source: VerificationOutcome["trace"]["entropySource"] = "unavailable";
   let revealBlockhash: Uint8Array | null = null;
+  const hasInput = round.revealInput.length === 32 && round.revealInput.some((b) => b !== 0);
 
-  if (round.randomness.some((b) => b !== 0)) {
+  if (hasInput) {
+    const recomputed = await deps.deriveRandomness(round.revealInput, round.id);
+    const recomputedHex = Buffer.from(recomputed).toString("hex");
+    const recordedHex = Buffer.from(round.randomness).toString("hex");
+    add("entropy_available", true, "reveal_input persisted on Round at settle");
+    add(
+      "entropy_recomputed_from_persisted_input_matches_recorded",
+      recomputedHex === recordedHex,
+      `recomputed=${recomputedHex} recorded=${recordedHex}`
+    );
+    // Use the RECOMPUTED value downstream: if the two ever disagreed the check
+    // above already fails, so this never masks a mismatch.
+    entropy = recomputed;
+    source = "persisted_input";
+  } else if (round.randomness.some((b) => b !== 0)) {
     entropy = round.randomness;
     source = "recorded_randomness";
-    add("entropy_available", true, "recorded on Round at settle");
+    add("entropy_available", true, "recorded on Round at settle (no reveal_input: pre-redeploy round)");
+    add(
+      "entropy_recomputed_from_persisted_input_matches_recorded",
+      false,
+      "round has no persisted reveal_input, so entropy cannot be independently recomputed"
+    );
   } else if (round.revealSlot > 0n) {
     revealBlockhash = await deps.fetchRevealBlockhash(round.revealSlot);
     if (revealBlockhash) {
       entropy = await deps.deriveRandomness(revealBlockhash, round.id);
       source = "recomputed_blockhash";
-      add("entropy_available", true, `recomputed from blockhash at slot ${round.revealSlot}`);
+      add("entropy_available", true, `recomputed from getBlock(${round.revealSlot}).blockhash`);
     } else {
       add("entropy_available", false, `reveal blockhash for slot ${round.revealSlot} not available yet`);
     }
@@ -100,6 +130,7 @@ export async function verifyRoundData(round: RoundData, deps: VerifyDeps): Promi
     checks,
   };
   if (entropy) trace.randomnessHex = Buffer.from(entropy).toString("hex");
+  if (hasInput) trace.revealInputHex = Buffer.from(round.revealInput).toString("hex");
   if (revealBlockhash) trace.revealBlockhash = new PublicKey(revealBlockhash).toBase58();
 
   let ok = checks.every((c) => c.pass);
@@ -115,6 +146,15 @@ export async function verifyRoundData(round: RoundData, deps: VerifyDeps): Promi
     } catch (e) {
       add("ticket_within_total_weight", false, e instanceof Error ? e.message : "unknown");
       ok = false;
+    }
+
+    // The ticket must be the one the program stored, not merely a valid one.
+    if (round.winningTicket > 0n) {
+      add(
+        "ticket_matches_recorded",
+        ticket === round.winningTicket,
+        `computed=${ticket} onChain=${round.winningTicket}`
+      );
     }
 
     // Fee/payout math must match pot * fee_bps
@@ -186,6 +226,10 @@ export function roundToSummary(round: RoundData, escrowBase58: string) {
     payoutLamports: round.payoutLamports ? round.payoutLamports.toString() : undefined,
     feeLamports: round.feeLamports ? round.feeLamports.toString() : undefined,
     randomnessHex: round.randomness.some((b) => b !== 0) ? Buffer.from(round.randomness).toString("hex") : undefined,
+    revealInputHex:
+      round.revealInput.length === 32 && round.revealInput.some((b) => b !== 0)
+        ? Buffer.from(round.revealInput).toString("hex")
+        : undefined,
     winningTicket: round.winningTicket ? round.winningTicket.toString() : undefined,
   };
 }
