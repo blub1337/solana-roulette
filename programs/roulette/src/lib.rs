@@ -456,9 +456,10 @@ pub mod roulette {
             if amount == 0 {
                 continue;
             }
+            // `wallet` is already an &AccountInfo from remaining_accounts.
             move_lamports(
                 &ctx.accounts.escrow.to_account_info(),
-                wallet.to_account_info(),
+                wallet,
                 amount,
             )?;
         }
