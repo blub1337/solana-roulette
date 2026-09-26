@@ -29,11 +29,20 @@ jobs:
           sh -c "$(curl -sSfL https://release.anza.xyz/v1.18.17/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
 
-      - name: Install Anchor (avm)
+      # Prebuilt binary (no compile). Fallback builds avm from the v0.30.1 TAG —
+      # building from master requires cargo ≥ edition2024 support (fails on 1.82).
+      - name: Install Anchor 0.30.1
         run: |
-          cargo install --git https://github.com/coral-xyz/anchor avm --locked
-          avm install 0.30.1
-          avm use 0.30.1
+          if curl -sfL -o /tmp/anchor https://github.com/coral-xyz/anchor/releases/download/v0.30.1/anchor-linux-x64; then
+            sudo install -m 0755 /tmp/anchor /usr/local/bin/anchor
+            echo "installed prebuilt anchor binary"
+          else
+            echo "prebuilt binary unavailable — building avm from tag v0.30.1"
+            cargo install --git https://github.com/coral-xyz/anchor avm --tag v0.30.1 --locked
+            avm install 0.30.1
+            avm use 0.30.1
+          fi
+          anchor --version
 
       - name: Show toolchain
         run: |
