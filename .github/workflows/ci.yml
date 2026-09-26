@@ -43,6 +43,13 @@ jobs:
         run: |
           cargo test --manifest-path programs/roulette/Cargo.toml \
             --test randomness_parity -- --nocapture
+      # B2 guard: lock/settle/pay must stay permissionless, cancel_round must
+      # stay operator-gated, and settle_round's SlotHashes sysvar must stay
+      # address-pinned (that pin is what stops a forged-entropy winner pick).
+      - name: Rust settlement authority test
+        run: |
+          cargo test --manifest-path programs/roulette/Cargo.toml \
+            --test settlement_authority -- --nocapture
       - name: Test program (localnet)
         run: anchor test --skip-build --skip-deploy || true
 
