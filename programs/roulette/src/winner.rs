@@ -79,16 +79,15 @@ pub fn pick_winner(
     err!(RouletteError::InvalidParticipant)
 }
 
-/// Anchor account discriminator: sha256("account:Participant")[0..8], cached.
+/// Anchor account discriminator: sha256("account:Participant")[0..8].
+/// Computed on each call — a cached `static` (OnceLock) emits a `.bss`
+/// symbol with a mangled name longer than the 16 bytes the SBF loader's ELF
+/// parser allows, which makes `solana program deploy` reject the binary.
 fn participant_discriminator() -> [u8; 8] {
-    use std::sync::OnceLock;
-    static DISC: OnceLock<[u8; 8]> = OnceLock::new();
-    *DISC.get_or_init(|| {
-        let hash = Sha256::digest(b"account:Participant");
-        let mut out = [0u8; 8];
-        out.copy_from_slice(&hash[0..8]);
-        out
-    })
+    let hash = Sha256::digest(b"account:Participant");
+    let mut out = [0u8; 8];
+    out.copy_from_slice(&hash[0..8]);
+    out
 }
 
 /// Extract the blockhash for `slot` from the SlotHashes sysvar data.
