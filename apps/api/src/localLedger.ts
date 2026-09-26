@@ -119,6 +119,8 @@ interface LocalRound {
   payoutAccount: Uint8Array;
   tier: number;
   bump: number;
+  /** The revealed "blockhash" fed to deriveRandomness (mirrors Round.reveal_input). */
+  revealInput: Uint8Array;
   participants: LocalParticipant[];
   escrowBalance: bigint;
   /** Commit–reveal: public commitment + privately held secret. */
@@ -253,6 +255,7 @@ export class LocalLedger {
       payoutAccount: r.payoutAccount,
       tier: r.tier,
       bump: r.bump,
+      revealInput: r.revealInput,
     };
   }
 
@@ -311,6 +314,7 @@ export class LocalLedger {
       payoutAccount: new Uint8Array(32),
       tier,
       bump: roundBump,
+      revealInput: new Uint8Array(32),
       participants: [],
       escrowBalance: 0n,
       // Placeholder commitment; replaced by lock_round.
@@ -421,6 +425,9 @@ export class LocalLedger {
       Buffer.from(r.secret)
     );
     this.slotHashes.set(r.revealSlot.toString(), blockhash);
+    // Persist the input exactly like the program does, so verifyRoundData can
+    // recompute the draw from the round record alone.
+    r.revealInput = blockhash;
 
     // Identical derivation to the program.
     const randomness = deriveRandomness(blockhash, r.id);
