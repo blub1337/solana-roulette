@@ -373,7 +373,8 @@ pub mod roulette {
         // (a circular derivation) makes invoke_signed fail with "Provided
         // seeds do not result in a valid address", which blocked every payout.
         let escrow_bump = ctx.bumps.escrow;
-        let escrow_seeds: &[&[&[u8]]] = &[&[ESCROW_SEED, round.key().as_ref(), &[escrow_bump]]];
+        let round_key = round.key();
+        let escrow_seeds: &[&[&[u8]]] = &[&[ESCROW_SEED, round_key.as_ref(), &[escrow_bump]]];
 
         // 92.5% to the verified winner.
         system_program::transfer(
@@ -422,7 +423,8 @@ pub mod roulette {
 
         // Same escrow PDA seeds as pay_winners: [ESCROW_SEED, round_key, bump].
         let escrow_bump = ctx.bumps.escrow;
-        let escrow_seeds: &[&[&[u8]]] = &[&[ESCROW_SEED, round.key().as_ref(), &[escrow_bump]]];
+        let round_key = round.key();
+        let escrow_seeds: &[&[&[u8]]] = &[&[ESCROW_SEED, round_key.as_ref(), &[escrow_bump]]];
 
         let pairs = ctx.remaining_accounts.chunks(2);
         for pair in pairs {
