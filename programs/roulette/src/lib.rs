@@ -191,6 +191,7 @@ pub mod roulette {
             payout_account: Pubkey::default(),
             tier: args.tier,
             bump: round_bump,
+            reveal_input: [0u8; 32],
         };
         let encoded = {
             // `try_to_vec` serialises the FIELDS only; the 8-byte Anchor
@@ -359,6 +360,12 @@ pub mod roulette {
         round.payout_account = winner;
         round.fee_lamports = fee;
         round.payout_lamports = payout;
+        // Persist the EXACT input the program hashed, read from the SlotHashes
+        // sysvar above. Without it the outcome is not independently
+        // recomputable, because the sysvar holds per-slot bank hashes that no
+        // RPC exposes via getBlock(slot).blockhash. Written before the freeze
+        // so a replay of settle reproduces the same value byte for byte.
+        round.reveal_input = reveal_blockhash;
         // Status stays RANDOMNESS_PENDING: payouts happen in pay_winners. The
         // frozen winner + amounts make any replay produce identical values, so
         // re-running settle is harmless (on-chain determinism, not trust).
