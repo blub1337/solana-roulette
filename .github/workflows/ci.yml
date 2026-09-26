@@ -21,13 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # cargo 1.83+ writes lockfile v4 by default — breaks the 1.18 SBF cargo.
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.82.0
-      - name: Setup Solana CLI (Anza, 1.18.17)
+      - name: Setup Solana CLI (Anza stable)
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v1.18.17/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)" || \
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - name: Install Anchor CLI (0.30.2 prebuilt)
         run: |
