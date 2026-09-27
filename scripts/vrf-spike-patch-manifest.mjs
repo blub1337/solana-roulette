@@ -3,6 +3,7 @@
 // order-independent: it strips both SDK lines and re-inserts the selected one.
 //
 //   node scripts/vrf-spike-patch-manifest.mjs --line vrf     --anchor 0.30.1
+//   node scripts/vrf-spike-patch-manifest.mjs --line vrf     --anchor 0.30.1 --pin-solana 1.18.26
 //   node scripts/vrf-spike-patch-manifest.mjs --line rollups --anchor 0.32.2
 //
 // --line vrf     : ephemeral-vrf-sdk (git tag v0.2.3 — the yanked crates.io
@@ -28,6 +29,13 @@ function arg(name, fallback) {
 
 const line = arg("line", "vrf");
 const anchor = arg("anchor", "0.30.1");
+// The 0.2.x SDK declares `solana-program = ">=1.18.26, <3"`, so cargo picks
+// the NEWEST version in range (2.x). Its code is written against the 1.18
+// API, and the `anchor` feature re-exports anchor's Pubkey, so 1.18 + 2.x in
+// one graph gives two distinct `Pubkey` types and 16 E0308s inside the SDK.
+// Pinning solana-program to the version anchor-lang 0.30.1 actually uses
+// unifies them.
+const pin = arg("pin-solana", "none");
 
 if (line !== "vrf" && line !== "rollups") {
   console.error(`unknown --line ${line} (expected vrf|rollups)`);
@@ -65,6 +73,13 @@ src = src.replace(
 );
 
 // 3. Re-insert exactly the selected line, and enable it by default.
+src = src.replace(/^solana-program = "=[^"]*"\n/m, "");
+if (pin !== "none") {
+  src = src.replace(
+    /^(anchor-lang = \{[^\n]*\}\n)/m,
+    `$1solana-program = "=${pin}"\n`,
+  );
+}
 const enabled = line === "vrf" ? "sdk-vrf" : "sdk-rollups";
 const featureBlock =
   line === "vrf"
@@ -91,7 +106,7 @@ fs.writeFileSync(MANIFEST, src);
 
 const report = src
   .split("\n")
-  .filter((l) => /^(default|sdk-vrf|sdk-rollups|anchor-lang|ephemeral-\S+-sdk)\s*=/.test(l))
+  .filter((l) => /^(default|sdk-vrf|sdk-rollups|anchor-lang|ephemeral-\S+-sdk|solana-program)\s*=/.test(l))
   .join("\n");
-console.log(`patched ${MANIFEST}: line=${line} anchor=${anchor}`);
+console.log(`patched ${MANIFEST}: line=${line} anchor=${anchor} pin-solana=${pin}`);
 console.log(report);
