@@ -2,39 +2,34 @@ name: VRF spike (MagicBlock SolanaVrf feasibility)
 
 # THROWAWAY, ISOLATED. Nothing in this workflow builds, deploys or modifies
 # programs/roulette — the money-moving program is never redeployed from here.
-# The spike program has its own keypair, its own id and its own state.
+# The spike program has its own keypair, its own program id and its own state.
+#
+# Two questions, two jobs:
+#   compat  — does ANY published MagicBlock SDK line compile on the
+#             anchor-lang 0.30.1 the roulette program is pinned to?
+#   runtime — does a REAL devnet request get fulfilled, and can the consuming
+#             program authenticate and store the result?
 
 on:
   workflow_dispatch:
 
 jobs:
   # ---------------------------------------------------------------------
-  # 1. COMPATIBILITY. Does anchor-lang 0.30.1 compile against
-  #    ephemeral-rollups-sdk 0.17.3 with `anchor-compat`, without an upgrade?
+  # 1. COMPATIBILITY against anchor-lang 0.30.1.
   # ---------------------------------------------------------------------
-  build:
-    name: build ${{ matrix.variant }}
+  compat:
+    name: compat anchor-0.30.1
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          # PRIMARY: the only line whose dependency graph can coexist with the
-          # anchor-lang 0.30.1 the roulette program is pinned to.
-          - variant: sdk-0.2.3__anchor-0.30.1
-            sdk: "0.2.3"
+          - variant: sdk-0.2.3-git__anchor-0.30.1
+            line: vrf
             anchor: "0.30.1"
-            pin: "none"
-          # Same, with solana-program pinned, to prove the lock is deterministic.
-          - variant: sdk-0.2.3__anchor-0.30.1__pinned
-            sdk: "0.2.3"
+          - variant: sdk-0.17.3__anchor-0.30.1
+            line: rollups
             anchor: "0.30.1"
-            pin: "1.18.26"
-          # Informational: does the same SDK also work on a newer Anchor?
-          - variant: sdk-0.2.3__anchor-0.31.1
-            sdk: "0.2.3"
-            anchor: "0.31.1"
-            pin: "none"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -48,9 +43,9 @@ jobs:
 
       - name: Apply manifest variant
         run: |
-          npm install --no-save tweetnacl >/dev/null 2>&1
-          node scripts/vrf-spike-patch-manifest.mjs --sdk "${{ matrix.sdk }}" --anchor "${{ matrix.anchor }}" --pin-solana "${{ matrix.pin }}"
-          cat programs/vrf-spike/Cargo.toml
+          node scripts/vrf-spike-patch-manifest.mjs --line "${{ matrix.line }}" --anchor "${{ matrix.anchor }}"
+          sed -n '/^\[features\]/,/^\[dependencies\]/p' programs/vrf-spike/Cargo.toml
+          grep '^anchor-lang\|^ephemeral-' programs/vrf-spike/Cargo.toml
 
       - name: Build spike
         run: |
@@ -58,36 +53,35 @@ jobs:
           cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy
           test -f target/deploy/vrf_spike.so || { echo "vrf_spike.so missing" >&2; exit 1; }
           SZ=$(stat -c %s target/deploy/vrf_spike.so)
-          echo "SPIKE_PROGRAM_SIZE_BYTES=$SZ" | tee -a "$GITHUB_ENV"
+          echo "SPIKE_PROGRAM_SIZE_BYTES=$SZ"
           echo "spike .so size: $SZ bytes ($(( SZ / 1024 )) KiB)"
-          if [ "$SZ" -gt 368640 ]; then echo "WARNING: exceeds the 360 KiB SBF program limit" >&2; fi
 
-      - name: Report resolved versions
+      - name: Resolved versions
         if: always()
         run: |
-          echo "--- resolved anchor-lang / solana-program in the spike graph ---"
-          grep -A1 'name = "anchor-lang"' programs/vrf-spike/Cargo.lock || true
-          grep -A1 'name = "solana-program"' programs/vrf-spike/Cargo.lock || true
-          grep -A1 'name = "ephemeral-rollups-sdk"' programs/vrf-spike/Cargo.lock || true
+          for c in anchor-lang solana-program ephemeral-vrf-sdk ephemeral-rollups-sdk ephemeral-vrf-sdk-vrf-macro; do
+            grep -A1 "name = \"$c\"" programs/vrf-spike/Cargo.lock 2>/dev/null || true
+          done
 
-      - name: Build the roulette program too (size baseline only, never deployed)
+      - name: Roulette program size baseline (built for measurement only, NEVER deployed here)
         if: always()
         run: |
+          rm -f programs/roulette/Cargo.lock
           cargo build-sbf --manifest-path programs/roulette/Cargo.toml --sbf-out-dir target/deploy-roulette || true
           if [ -f target/deploy-roulette/roulette.so ]; then
             echo "ROULETTE_PROGRAM_SIZE_BYTES=$(stat -c %s target/deploy-roulette/roulette.so)"
           fi
 
   # ---------------------------------------------------------------------
-  # 2. REAL DEVNET TEST. Deploys ONLY the spike, issues a REAL
-  #    RequestRandomness against DEFAULT_QUEUE and waits for the REAL
-  #    oracle fulfillment.
+  # 2. REAL DEVNET TEST with a non-yanked SDK release. anchor-lang is pinned
+  #    to the same version the SDK's compat range resolves to, because the
+  #    consumer and the SDK must share ONE anchor_lang in the graph.
+  #    The spike program's Anchor version is irrelevant to whether MagicBlock
+  #    works at runtime; only its real devnet behaviour is measured here.
   # ---------------------------------------------------------------------
-  devnet:
+  runtime:
     name: real devnet request
     runs-on: ubuntu-latest
-    needs: build
-    if: always()
     env:
       SOLANA_URL: https://api.devnet.solana.com
     steps:
@@ -128,7 +122,7 @@ jobs:
           for i in 1 2 3 4 5 6 7 8; do
             B=$(bal_lamports)
             echo "devnet balance: ${B:-0} lamports"
-            if [ "${B:-0}" -ge 4000000000 ]; then echo "funded"; break; fi
+            if [ "${B:-0}" -ge 4000000000 ]; then echo funded; break; fi
             solana airdrop 2 "$ADDR" --url "$SOLANA_URL" || true
             sleep 15
           done
@@ -145,31 +139,20 @@ jobs:
           node scripts/vrf-spike-derive-deploy.mjs | tee /tmp/spike-id.txt
           grep '^SPIKE_PROGRAM_ID=' /tmp/spike-id.txt | cut -d= -f2 >> "$GITHUB_ENV"
 
-      # Prefer the 0.30.1 build. If — and only if — that fails, fall back to
-      # 0.31.1 so the RUNTIME question is still answered, and say loudly that
-      # the fallback happened (it is the Option B blocker if it is needed).
-      - name: Build the spike on anchor 0.30.1
+      - name: Build the spike
         run: |
           rm -f programs/vrf-spike/Cargo.lock
-          node scripts/vrf-spike-patch-manifest.mjs --sdk 0.2.3 --anchor 0.30.1 --pin-solana none
-          if cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy; then
-            echo "SPIKE_ANCHOR_VERSION=0.30.1" | tee -a "$GITHUB_ENV"
-            echo "### COMPAT OK: anchor-lang 0.30.1 + ephemeral-vrf-sdk 0.2.3 COMPILED ###" | tee -a "$GITHUB_STEP_SUMMARY"
-          else
-            echo "### COMPAT BLOCKER: 0.2.3 did not compile on anchor 0.30.1; retrying on 0.31.1 to still answer the RUNTIME question ###" | tee -a "$GITHUB_STEP_SUMMARY"
-            node scripts/vrf-spike-patch-manifest.mjs --sdk 0.2.3 --anchor 0.31.1 --pin-solana none
-            cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy
-            echo "SPIKE_ANCHOR_VERSION=0.31.1" | tee -a "$GITHUB_ENV"
-          fi
+          node scripts/vrf-spike-patch-manifest.mjs --line rollups --anchor 0.32.2
+          cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy
           test -f target/deploy/vrf_spike.so || { echo "vrf_spike.so missing" >&2; exit 1; }
           echo "SPIKE_PROGRAM_SIZE_BYTES=$(stat -c %s target/deploy/vrf_spike.so)" | tee -a "$GITHUB_ENV"
-          echo "--- resolved versions in the spike graph ---"
-          grep -A1 'name = "anchor-lang"' programs/vrf-spike/Cargo.lock || true
-          grep -A1 'name = "solana-program"' programs/vrf-spike/Cargo.lock || true
-          grep -A1 'name = "ephemeral-vrf-sdk"' programs/vrf-spike/Cargo.lock || true
+          for c in anchor-lang solana-program ephemeral-rollups-sdk; do
+            grep -A1 "name = \"$c\"" programs/vrf-spike/Cargo.lock || true
+          done
 
-      - name: Build the roulette program for the size baseline (NEVER deployed here)
+      - name: Roulette program size baseline (NEVER deployed here)
         run: |
+          rm -f programs/roulette/Cargo.lock
           cargo build-sbf --manifest-path programs/roulette/Cargo.toml --sbf-out-dir target/deploy-roulette || true
           if [ -f target/deploy-roulette/roulette.so ]; then
             echo "ROULETTE_PROGRAM_SIZE_BYTES=$(stat -c %s target/deploy-roulette/roulette.so)" | tee -a "$GITHUB_ENV"
@@ -187,7 +170,7 @@ jobs:
               -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$SPIKE_PROGRAM_ID\",{\"encoding\":\"base64\"}]}" \
               | grep -o '"executable":[a-z]*' | head -1)
             if [ "$ACCT" = '"executable":true' ]; then
-              echo "spike program is live: $SPIKE_PROGRAM_ID (built with anchor $SPIKE_ANCHOR_VERSION)"
+              echo "spike program is live: $SPIKE_PROGRAM_ID"
               break
             fi
             echo "not visible yet (attempt $i: ${ACCT:-none})"; sleep 6
@@ -201,7 +184,7 @@ jobs:
           node scripts/vrf-spike-request.mjs \
             --program "$SPIKE_PROGRAM_ID" \
             --keypair ~/.config/solana/id.json \
-            --lane both \
+            --requests 2 \
             --timeout 300000 2>&1 | tee /tmp/vrf-spike-request.log
           echo "###VRF-SPIKE-RESULT###"
           sed -n '/###VRF-SPIKE-RESULT###/,/###END###/p' /tmp/vrf-spike-request.log
@@ -212,7 +195,6 @@ jobs:
         run: |
           {
             echo "### VRF SPIKE SUMMARY"
-            echo "- anchor version used by the spike: \`${{ env.SPIKE_ANCHOR_VERSION }}\`"
             echo "- spike .so size: \`${{ env.SPIKE_PROGRAM_SIZE_BYTES }}\` bytes"
             echo "- roulette .so size (baseline): \`${{ env.ROULETTE_PROGRAM_SIZE_BYTES }}\` bytes"
             echo "- spike program id: \`${{ env.SPIKE_PROGRAM_ID }}\`"
