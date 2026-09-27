@@ -103,7 +103,10 @@ export default function PoolRoom() {
     <main className="mx-auto max-w-6xl px-4 py-8">
       <nav className="mb-6 flex flex-wrap items-center justify-between gap-4">
         <Link href="/" aria-label="SolRoll home" className="shrink-0">
-          <BrandLogo className="h-9 w-auto sm:h-10" />
+          <BrandLogo
+            className="h-9 w-auto sm:h-10"
+            fallbackClassName="text-lg sm:text-xl"
+          />
         </Link>
         <WalletMultiButton />
       </nav>
