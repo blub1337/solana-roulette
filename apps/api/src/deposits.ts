@@ -20,13 +20,19 @@ import type { AppConfig } from "@solana-roulette/config";
 import type { ChainBackend } from "./backend.js";
 import { store, broadcast } from "./store.js";
 import { depositAttemptOf, depositKey, txToDto, TxStateError, type ChainTx } from "./txLedger.js";
-import { checkSystemTransfer, logRpcView, COMMITMENT } from "./onchain.js";
+import { checkSystemTransfer, checkProgramDeposit, logRpcView, COMMITMENT } from "./onchain.js";
 import { requireCustody, type Custody, DEVNET_EXPLORER_TX } from "./custody.js";
 import { depositState } from "./adminState.js";
 import { txLog } from "./logger.js";
 import { LocalLedgerError } from "./localLedger.js";
 import { tierCapLamports } from "./settlement.js";
-import { getEscrowPda } from "@solana-roulette/verification";
+import {
+  getEscrowPda,
+  getParticipantPda,
+  getRoundPda,
+  decodeParticipant,
+  PARTICIPANT_SPACE,
+} from "@solana-roulette/verification";
 
 export class DepositError extends Error {
   constructor(
@@ -136,7 +142,7 @@ export async function createDepositIntent(
 
 /**
  * Where the player's lamports must land: the round's program escrow when the
- * Anchor program is deployed, otherwise the devnet custody escrow.
+ * Anchor program is live, otherwise the devnet custody escrow.
  */
 function depositRecipient(deps: DepositDeps, roundId: bigint): PublicKey {
   if (deps.backend.mode === "chain") return getEscrowPda(deps.programId, roundId)[0];
@@ -173,15 +179,27 @@ export async function confirmDeposit(
   const wallet = new PublicKey(existing.wallet);
   const escrow = new PublicKey(existing.recipient);
   const amount = BigInt(existing.depositAmountLamports ?? "0");
+  const programPath = deps.backend.mode === "chain";
 
   let check;
   try {
-    check = await checkSystemTransfer(connection, {
-      signature: args.signature,
-      from: wallet,
-      to: escrow,
-      amount,
-    });
+    if (programPath) {
+      check = await checkProgramDeposit(connection, {
+        signature: args.signature,
+        programId: deps.programId,
+        roundId: BigInt(existing.roundId),
+        wallet,
+        escrow,
+        amount,
+      });
+    } else {
+      check = await checkSystemTransfer(connection, {
+        signature: args.signature,
+        from: wallet,
+        to: escrow,
+        amount,
+      });
+    }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     store.txs.failPending(existing.id, detail);
@@ -234,7 +252,12 @@ export async function confirmDeposit(
 
   const roundId = BigInt(existing.roundId);
   try {
-    await backend.deposit({ roundId, wallet, lamports: check.transfer.amount });
+    if (!programPath) {
+      // Local mode only: the ledger IS the round state, so credit it here.
+      // In chain mode the program already wrote the Round/Participant PDAs
+      // inside the verified transaction — crediting again would double-count.
+      await backend.deposit({ roundId, wallet, lamports: check.transfer.amount });
+    }
   } catch (err) {
     if (err instanceof LocalLedgerError) {
       // The money arrived but the round rejected it (cap/duplicate/status).
@@ -255,6 +278,7 @@ export async function confirmDeposit(
     signature: args.signature,
     confirmedAt: new Date(),
   });
+  // The chain decides: re-read the Round PDA for the authoritative pot/status.
   const round = await backend.getRound(roundId);
   store.upsertRound({
     id: roundId.toString(),
@@ -268,6 +292,13 @@ export async function confirmDeposit(
     network: custody.cluster,
     ok: true,
     slot: check.slot,
+  });
+  txLog.info("deposit.mode", {
+    mode: programPath ? "program_instruction" : "system_transfer",
+    roundId: existing.roundId,
+    onChainPot: round?.pot.toString() ?? "n/a",
+    onChainStatus: round?.status ?? "n/a",
+    participantCount: round?.participantCount ?? 0,
   });
   txLog.info("deposit.credited", {
     id: confirmed.id,
