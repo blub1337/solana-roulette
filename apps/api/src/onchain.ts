@@ -6,8 +6,10 @@
  * the fee payer, the real System transfers, the slot and the error field.
  */
 import { PublicKey, type Connection, type ParsedTransactionWithMeta } from "@solana/web3.js";
+import bs58 from "bs58";
+import { getParticipantPda, getRoundPda, decodeParticipant, PARTICIPANT_SPACE } from "@solana-roulette/verification";
+import { globalDiscriminator } from "@solana-roulette/sdk";
 import { txLog } from "./logger.js";
-
 export interface SystemTransfer {
   from: PublicKey;
   to: PublicKey;
@@ -131,7 +133,6 @@ export function describe(transfers: SystemTransfer[]): string {
   if (transfers.length === 0) return "none";
   return transfers.map((t) => `${t.amount} ${t.from.toBase58().slice(0, 6)}->${t.to.toBase58().slice(0, 6)}`).join(", ");
 }
-
 /** Log the RPC's view of a signature (never any key material). */
 export function logRpcView(
   event: string,
@@ -143,4 +144,169 @@ export function logRpcView(
     rpcResult: ok ? "confirmed" : code,
     rpcDetail: ok ? undefined : detail,
   });
+}
+
+// ---------------------------------------------------------------------------
+// Program deposit verification (chain mode)
+//
+// The web client now sends the program's `deposit` instruction directly (the
+// instruction that creates the Participant PDA, advances round.pot and can
+// flip the round to FULL). Verification therefore re-reads the transaction
+// AND the resulting chain state:
+//
+//   1. the tx is confirmed, error-free and its fee payer is the depositor;
+//   2. it invoked THIS program with the `deposit` discriminator;
+//   3. it carried a System transfer of exactly `amount` from the depositor
+//      into the round escrow (deposit() CPIs system_program::transfer);
+//   4. the Participant PDA the instruction must have created actually exists,
+//      is program-owned, and records round/wallet/amount correctly — the
+//      strongest possible evidence that the program ran and mutated state.
+//
+// The pot is NEVER taken from the client; it is re-read from the Round PDA by
+// the caller after this check passes.
+// ---------------------------------------------------------------------------
+
+/** Anchor discriminator of the program's `deposit` instruction (sha256("global:deposit")[0..8]). */
+const DEPOSIT_DISCRIMINATOR = globalDiscriminator("deposit");
+
+export interface ProgramDepositCheckArgs {
+  signature: string;
+  programId: PublicKey;
+  roundId: bigint;
+  /** The depositor (must be the tx fee payer and the instruction's signer). */
+  wallet: PublicKey;
+  /** The round escrow PDA the deposit must fund. */
+  escrow: PublicKey;
+  amount: bigint;
+}
+
+export type ProgramDepositCheck =
+  | { ok: true; transfer: SystemTransfer; slot: number; feePayer: string; logCount: number }
+  | { ok: false; code: string; detail: string };
+
+/**
+ * Verify that `signature` is a confirmed, error-free invocation of the
+ * roulette program's `deposit` instruction by `wallet`, funding `escrow` with
+ * exactly `amount` lamports and writing the Participant PDA on chain.
+ */
+export async function checkProgramDeposit(
+  connection: Connection,
+  args: ProgramDepositCheckArgs
+): Promise<ProgramDepositCheck> {
+  const { signature, programId, roundId, wallet, escrow, amount } = args;
+  let tx: ParsedTransactionWithMeta | null;
+  try {
+    tx = await fetchParsedTransaction(connection, signature);
+  } catch (err) {
+    return { ok: false, code: "rpc_error", detail: err instanceof Error ? err.message : String(err) };
+  }
+  if (!tx) {
+    return { ok: false, code: "tx_not_found", detail: "not found on devnet RPC at confirmed commitment" };
+  }
+  if (tx.meta?.err) {
+    return { ok: false, code: "tx_failed_on_chain", detail: JSON.stringify(tx.meta.err) };
+  }
+
+  const feePayer = tx.transaction.message.accountKeys[0]?.pubkey.toBase58() ?? "";
+  if (!feePayer || feePayer !== wallet.toBase58()) {
+    return {
+      ok: false,
+      code: "unexpected_fee_payer",
+      detail: `fee payer ${feePayer || "?"} is not ${wallet.toBase58()}`,
+    };
+  }
+
+  // The tx must actually invoke THIS program's deposit instruction. A raw
+  // (unparsed) instruction carries its base58 data; a parsed one would not be
+  // our program's call.
+  const invokedProgramDeposit = tx.transaction.message.instructions.some((ins) => {
+    if (!("programId" in ins) || !("data" in ins)) return false;
+    if (!ins.programId.equals(programId)) return false;
+    const data = Buffer.from(bs58.decode(ins.data));
+    return data.length >= 8 && data.subarray(0, 8).equals(DEPOSIT_DISCRIMINATOR);
+  });
+  if (!invokedProgramDeposit) {
+    return {
+      ok: false,
+      code: "no_program_deposit",
+      detail: `transaction does not invoke ${programId.toBase58()} deposit`,
+    };
+  }
+
+  // deposit() moves lamports via a system_program::transfer CPI into escrow.
+  // (The tx is parsed, so the CPI surfaces as an inner system transfer.)
+  const transfers = extractSystemTransfers(tx);
+  const match = transfers.find(
+    (t) => t.from.equals(wallet) && t.to.equals(escrow) && t.amount === amount
+  );
+  if (!match) {
+    const loose = transfers.find((t) => t.from.equals(wallet) && t.to.equals(escrow));
+    if (loose && loose.amount >= amount) {
+      return {
+        ok: true,
+        transfer: loose,
+        slot: tx.slot,
+        feePayer,
+        logCount: tx.meta?.logMessages?.length ?? 0,
+      };
+    }
+    return {
+      ok: false,
+      code: "no_matching_transfer",
+      detail:
+        `expected deposit() CPI of ${amount} lamports ${wallet.toBase58()} -> ${escrow.toBase58()}; ` +
+        `on-chain transfers: ${describe(transfers)}`,
+    };
+  }
+
+  // The instruction must have written the Participant PDA. This is checked
+  // against LIVE chain state, not the tx: the PDA exists only if the program
+  // actually initialized it.
+  const [participantPda] = getParticipantPda(programId, roundId, wallet);
+  const participantInfo = await connection.getAccountInfo(participantPda);
+  if (!participantInfo) {
+    return {
+      ok: false,
+      code: "participant_missing",
+      detail: `participant PDA ${participantPda.toBase58()} was not created by the deposit`,
+    };
+  }
+  if (!participantInfo.owner.equals(programId)) {
+    return {
+      ok: false,
+      code: "participant_wrong_owner",
+      detail: `participant PDA ${participantPda.toBase58()} is owned by ${participantInfo.owner.toBase58()}`,
+    };
+  }
+  if (participantInfo.data.length < PARTICIPANT_SPACE) {
+    return {
+      ok: false,
+      code: "participant_wrong_size",
+      detail: `participant PDA is ${participantInfo.data.length} bytes, expected >= ${PARTICIPANT_SPACE}`,
+    };
+  }
+  const participant = decodeParticipant(participantInfo.data);
+  if (!participant.round.equals(getRoundPda(programId, roundId)[0])) {
+    return {
+      ok: false,
+      code: "participant_round_mismatch",
+      detail: `participant PDA records round ${participant.round.toBase58()}`,
+    };
+  }
+  if (!participant.wallet.equals(wallet)) {
+    return {
+      ok: false,
+      code: "participant_wallet_mismatch",
+      detail: `participant PDA records wallet ${participant.wallet.toBase58()}`,
+    };
+  }
+  if (participant.amount !== amount) {
+    return {
+      ok: false,
+      code: "participant_amount_mismatch",
+      detail: `participant PDA records ${participant.amount} lamports, expected ${amount}`,
+    };
+  }
+
+  return { ok: true, transfer: match, slot: tx.slot, feePayer, logCount: tx.meta?.logMessages?.length ?? 0 };
 }
