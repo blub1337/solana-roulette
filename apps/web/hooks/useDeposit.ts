@@ -3,14 +3,28 @@
 /**
  * REAL devnet deposits from the player's wallet.
  *
+ * Two paths, chosen by the API's runtime mode (/api/health):
+ *
+ *  - "chain" (the deployed Anchor program): the player signs the PROGRAM's
+ *    `deposit` instruction. The instruction itself moves the lamports into the
+ *    round escrow PDA AND writes the Participant PDA, advancing round.pot and
+ *    participant_count on chain — so a round can reach FULL from web deposits
+ *    alone and every lamport stays reachable by pay_winners. The server then
+ *    re-reads the transaction and the created Participant PDA from the chain
+ *    before marking the entry credited (the client's word is never enough).
+ *
+ *  - "local" (in-memory ledger runtime): a plain SystemProgram.transfer into
+ *    the custody escrow, verified server-side, credited by the ledger.
+ *
+ * Either way:
  *   1. assert the wallet is on Solana DEVNET (cluster + RPC endpoint)
  *   2. assert the wallet actually holds enough DEVNET SOL
  *   3. ask the API for a PENDING deposit intent (escrow address, amount)
- *   4. build a REAL SystemProgram.transfer, sign it in the player's wallet
- *      (the normal wallet prompt — nothing is ever simulated)
+ *   4. build the transaction, simulate it, sign it in the player's wallet
+ *      (the normal wallet prompt — nothing is ever simulated for real)
  *   5. send it to the devnet RPC and wait for confirmation
- *   6. report the signature; the server re-reads the transaction from the
- *      chain and only then credits the round
+ *   6. report the signature; the server re-reads the chain and only then
+ *      credits the entry
  *
  * A rejected signature, a failed transaction or a timeout calls the cancel
  * endpoint, so the entry becomes FAILED and the pot is never credited.
@@ -26,6 +40,7 @@ import {
   getRoundPda,
 } from "@solana-roulette/verification";
 import { LAMPORTS_PER_SOL } from "@solana-roulette/types";
+import { useRuntime } from "./useRuntime";
 import { clientTxLog } from "../lib/txLog";
 import { API_BASE } from "../lib/apiBase";
 
@@ -34,9 +49,16 @@ const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
 /** Extra lamports kept for the fee payer so the transfer can never stall. */
 const TX_FEE_BUFFER_LAMPORTS = 10_000n;
+/**
+ * Rent-exempt minimum for a 101-byte Participant PDA the program's deposit
+ * instruction must create on first entry: (128 + 101) * 3480 lamports/byte/year
+ * * 2 years = 1_593_840. Only needed on the program path.
+ */
+const PARTICIPANT_RENT_LAMPORTS = 1_593_840n;
 const CONFIRMATION_ATTEMPTS = 20;
 
-const PROGRAM_ID = new PublicKey(
+/** Fallback when the API has not answered yet; real value comes from /api/health. */
+const FALLBACK_PROGRAM_ID = new PublicKey(
   process.env.NEXT_PUBLIC_ROULETTE_PROGRAM_ID ??
     "AAHBk1qbXCzsbiLe7TiXuZNTvNPVtovtC6NWk9tsi6EZ"
 );
@@ -117,6 +139,7 @@ export class DepositRejectedError extends Error {
 export function useDeposit() {
   const { publicKey, sendTransaction } = useWallet();
   const { connection } = useConnection();
+  const { runtime } = useRuntime();
   const [pending, setPending] = useState(false);
 
   const deposit = useCallback(
@@ -127,6 +150,16 @@ export function useDeposit() {
       const lamports = parseSol(args.amountSol);
       const network = "devnet";
       const started = Date.now();
+      // The deployed Anchor program path: the deposit instruction advances the
+      // on-chain round (pot, participant, FULL flip) in the SAME transaction.
+      const programPath = runtime?.mode === "chain" && !!runtime?.programId;
+      const programId = (() => {
+        try {
+          return runtime?.programId ? new PublicKey(runtime.programId) : FALLBACK_PROGRAM_ID;
+        } catch {
+          return FALLBACK_PROGRAM_ID;
+        }
+      })();
 
       clientTxLog.info("deposit.started", {
         wallet,
@@ -144,17 +177,19 @@ export function useDeposit() {
         assertDevnet(connection);
 
         // 2. balance check against the real devnet RPC
+        const required = lamports + TX_FEE_BUFFER_LAMPORTS + (programPath ? PARTICIPANT_RENT_LAMPORTS : 0n);
         const balance = BigInt(await connection.getBalance(publicKey, "confirmed"));
         clientTxLog.info("deposit.balance", {
           wallet,
           network,
           balanceLamports: balance.toString(),
-          requiredLamports: (lamports + TX_FEE_BUFFER_LAMPORTS).toString(),
+          requiredLamports: required.toString(),
+          programPath,
         });
-        if (balance < lamports + TX_FEE_BUFFER_LAMPORTS) {
+        if (balance < required) {
           throw new DepositRejectedError(
             `Not enough devnet SOL: wallet holds ${formatSol(balance)}, need ${formatSol(
-              lamports + TX_FEE_BUFFER_LAMPORTS
+              required
             )}. Use the devnet faucet below.`,
             "insufficient_devnet_balance"
           );
@@ -178,29 +213,63 @@ export function useDeposit() {
             explorer: `https://explorer.solana.com/tx/${intent.signature}?cluster=devnet`,
             amountLamports: intent.amountLamports,
             status: "CONFIRMED",
-            via: "system",
+            via: programPath ? "program" : "system",
           };
         }
 
-        // 4. build a REAL SystemProgram.transfer for exactly the intent amount
+        // 4. build the transaction.
+        //   chain mode → the program's `deposit` instruction: it CPIs the
+        //     System Program to move lamports into escrow, creates the
+        //     Participant PDA (init_if_needed), advances round.pot and flips
+        //     the round FULL when the tier cap is hit — all atomically.
+        //   local mode → a plain SystemProgram.transfer into the custody escrow.
         const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
-        const transfer = SystemProgram.transfer({
-          fromPubkey: publicKey,
-          toPubkey: new PublicKey(intent.escrow),
-          lamports: BigInt(intent.amountLamports),
-        });
+        const amountForTx = BigInt(intent.amountLamports);
         const tx = new Transaction({
           feePayer: publicKey,
           blockhash,
           lastValidBlockHeight,
-        }).add(transfer);
+        });
+        if (programPath) {
+          const roundPda = getRoundPda(programId, BigInt(args.roundId))[0];
+          const participantPda = getParticipantPda(programId, roundPda, publicKey)[0];
+          const escrowPda = getEscrowPda(programId, roundPda)[0];
+          const configPda = getGlobalConfigPda(programId)[0];
+          const disc = await anchorDiscriminator("deposit");
+          const amountLe = new Uint8Array(8);
+          new DataView(amountLe.buffer).setBigUint64(0, amountForTx, true);
+          tx.add(
+            new TransactionInstruction({
+              programId,
+              keys: [
+                { pubkey: configPda, isSigner: false, isWritable: false },
+                { pubkey: roundPda, isSigner: false, isWritable: true },
+                { pubkey: participantPda, isSigner: false, isWritable: true },
+                { pubkey: escrowPda, isSigner: false, isWritable: true },
+                { pubkey: publicKey, isSigner: true, isWritable: true },
+                { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+              ],
+              data: Buffer.concat([Buffer.from(disc), Buffer.from(amountLe)]),
+            })
+          );
+        } else {
+          tx.add(
+            SystemProgram.transfer({
+              fromPubkey: publicKey,
+              toPubkey: new PublicKey(intent.escrow),
+              lamports: amountForTx,
+            })
+          );
+        }
         const simulation = await connection.simulateTransaction(tx);
         clientTxLog.info("deposit.simulated", {
           wallet,
           network,
           recipient: intent.escrow,
           amountLamports: intent.amountLamports,
+          via: programPath ? "program" : "system",
           rpcError: simulation.value.err ? JSON.stringify(simulation.value.err) : null,
+          rpcLogs: simulation.value.logs?.slice(-6) ?? [],
         });
         if (simulation.value.err) {
           throw new DepositRejectedError(
@@ -265,7 +334,7 @@ export function useDeposit() {
           explorer: `https://explorer.solana.com/tx/${signature}?cluster=devnet`,
           amountLamports: result.amountLamports,
           status: result.status === "CONFIRMED" ? "CONFIRMED" : "PENDING",
-          via: "system",
+          via: programPath ? "program" : "system",
         };
       } catch (err) {
         const reason = err instanceof DepositRejectedError ? err.reason : classifyError(err);
@@ -293,7 +362,7 @@ export function useDeposit() {
         setPending(false);
       }
     },
-    [publicKey, connection, sendTransaction]
+    [publicKey, connection, sendTransaction, runtime]
   );
 
   return { deposit, pending };
@@ -353,6 +422,9 @@ function classifyError(err: unknown): string {
   if (/insufficient lamports|Attempt to debit/i.test(message)) return "insufficient_devnet_balance";
   if (/blockhash|expired|timeout/i.test(message)) return "blockhash_expired";
   if (/fetch failed|network|429|503/i.test(message)) return "rpc_unreachable";
+  // Program reverts surface as custom program errors (Anchor error codes).
+  if (/custom program error/i.test(message)) return "program_rejected";
+  if (/DuplicateDeposit|RoundOverCap|DepositTooSmall|DepositTooLarge/i.test(message)) return "program_rejected";
   return "unknown_error";
 }
 
@@ -436,27 +508,30 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * The Anchor program deposit path, kept for when the program is deployed on
- * devnet: the player signs a real `deposit` instruction and the same
- * /deposit/confirm verification credits the entry.
+ * The Anchor program deposit instruction builder — the same ix the live
+ * deposit path uses in "chain" mode (see `deposit()` above). Exposed for
+ * tests and tooling: the player signs a real `deposit` instruction and the
+ * same /deposit/confirm verification credits the entry.
  */
 export async function buildProgramDepositInstruction(args: {
   roundId: string;
   lamports: bigint;
   wallet: PublicKey;
+  programId?: PublicKey;
 }): Promise<TransactionInstruction> {
+  const programId = args.programId ?? FALLBACK_PROGRAM_ID;
   const round = BigInt(args.roundId);
-  const [roundPda] = getRoundPda(PROGRAM_ID, round);
-  const [escrowPda] = getEscrowPda(PROGRAM_ID, round);
-  const [configPda] = getGlobalConfigPda(PROGRAM_ID);
-  const [participantPda] = getParticipantPda(PROGRAM_ID, roundPda, args.wallet);
+  const [roundPda] = getRoundPda(programId, round);
+  const [escrowPda] = getEscrowPda(programId, round);
+  const [configPda] = getGlobalConfigPda(programId);
+  const [participantPda] = getParticipantPda(programId, roundPda, args.wallet);
 
   const disc = await anchorDiscriminator("deposit");
   const amountLe = new Uint8Array(8);
   new DataView(amountLe.buffer).setBigUint64(0, args.lamports, true);
 
   return new TransactionInstruction({
-    programId: PROGRAM_ID,
+    programId,
     keys: [
       { pubkey: configPda, isSigner: false, isWritable: false },
       { pubkey: roundPda, isSigner: false, isWritable: true },
