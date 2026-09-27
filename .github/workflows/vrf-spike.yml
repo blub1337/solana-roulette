@@ -227,6 +227,7 @@ jobs:
           # it sends with no preflight games, surfaces raw provider errors,
           # and only exits 0 when the VRF program's callback actually landed.
           set -e
+          export SPIKE_KEYPAIR=~/.config/solana/id.json
           node scripts/vrf-spike-second-round.mjs 45 0 240000 2>&1 | tee /tmp/vrf-spike-r1.log
           node scripts/vrf-spike-second-round.mjs 46 1 240000 2>&1 | tee /tmp/vrf-spike-r2.log
           echo "###VRF-SPIKE-RESULT###"
