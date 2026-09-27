@@ -11,16 +11,11 @@ name = "vrf_spike"
 
 [features]
 default = ["sdk-vrf"]
-# VRF SDK line A: ephemeral-vrf-sdk 0.2.3 — the only published line whose
-# dependency graph can coexist with anchor-lang 0.30.1. EVERY release in this
-# line (0.1.0 .. 0.2.3) is YANKED from crates.io, so it is consumed from its git
-# tag instead; git dependencies are not subject to registry yanking. The
-# published 0.2.3 tarball and this tag are the same code.
+# VRF SDK line: ephemeral-vrf-sdk v0.2.3 (git tag).
+# The only published line whose dependency graph coexists with anchor-lang
+# 0.30.1 — but EVERY release in it (0.1.0 .. 0.2.3) is YANKED from crates.io,
+# so it is consumed from git, which is not subject to registry yanking.
 sdk-vrf = ["dep:ephemeral-vrf-sdk"]
-# VRF SDK line B: ephemeral-rollups-sdk 0.17.3 — not yanked, but hard-requires
-# solana-program 3.0.0, which cannot be resolved alongside anchor-lang 0.30.1.
-# Used only to answer the RUNTIME question with a current, non-yanked release.
-sdk-rollups = []
 
 no-entrypoint = []
 no-idl = []
@@ -33,9 +28,11 @@ cpi = ["no-entrypoint"]
 # successful build here is direct evidence that MagicBlock can be added to
 # roulette without an Anchor upgrade.
 anchor-lang = { version = "=0.30.1", features = ["init-if-needed"] }
-
-# Both SDK lines are OPTIONAL so exactly one enters the resolve graph per
-# variant. A disabled optional dependency is not resolved at all, which is what
-# lets one manifest serve both the yanked 0.2.x line and the current 0.17.x.
 ephemeral-vrf-sdk = { git = "https://github.com/magicblock-labs/ephemeral-vrf", tag = "v0.2.3", features = ["anchor"], optional = true }
-ephemeral-rollups-sdk = { version = "=0.17.3", features = ["vrf", "anchor-compat"], optional = true }
+
+# NOTE: this manifest may contain exactly ONE VRF SDK line. `cargo metadata`
+# (which cargo-build-sbf invokes) resolves every DECLARED optional dependency
+# regardless of enabled features, so simply disabling the other line still
+# drags its solana-program 3.0 into the graph. Use
+# scripts/vrf-spike-patch-manifest.mjs --line rollups to swap lines; it
+# rewrites this file in place.
