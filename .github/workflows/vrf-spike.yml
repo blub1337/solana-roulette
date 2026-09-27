@@ -19,13 +19,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: anchor-0.30.1
+          # PRIMARY: the only line whose dependency graph can coexist with the
+          # anchor-lang 0.30.1 the roulette program is pinned to.
+          - variant: sdk-0.2.3__anchor-0.30.1
+            sdk: "0.2.3"
             anchor: "0.30.1"
             pin: "none"
-          - variant: anchor-0.30.1-pinned-solana
+          # Same, with solana-program pinned, to prove the lock is deterministic.
+          - variant: sdk-0.2.3__anchor-0.30.1__pinned
+            sdk: "0.2.3"
             anchor: "0.30.1"
             pin: "1.18.26"
-          - variant: anchor-0.31.1
+          # Informational: does the same SDK also work on a newer Anchor?
+          - variant: sdk-0.2.3__anchor-0.31.1
+            sdk: "0.2.3"
             anchor: "0.31.1"
             pin: "none"
     steps:
@@ -42,7 +49,7 @@ jobs:
       - name: Apply manifest variant
         run: |
           npm install --no-save tweetnacl >/dev/null 2>&1
-          node scripts/vrf-spike-patch-manifest.mjs --anchor "${{ matrix.anchor }}" --pin-solana "${{ matrix.pin }}"
+          node scripts/vrf-spike-patch-manifest.mjs --sdk "${{ matrix.sdk }}" --anchor "${{ matrix.anchor }}" --pin-solana "${{ matrix.pin }}"
           cat programs/vrf-spike/Cargo.toml
 
       - name: Build spike
@@ -141,21 +148,25 @@ jobs:
       # Prefer the 0.30.1 build. If — and only if — that fails, fall back to
       # 0.31.1 so the RUNTIME question is still answered, and say loudly that
       # the fallback happened (it is the Option B blocker if it is needed).
-      - name: Build the spike (prefer anchor 0.30.1)
+      - name: Build the spike on anchor 0.30.1
         run: |
           rm -f programs/vrf-spike/Cargo.lock
-          node scripts/vrf-spike-patch-manifest.mjs --anchor 0.30.1 --pin-solana none
+          node scripts/vrf-spike-patch-manifest.mjs --sdk 0.2.3 --anchor 0.30.1 --pin-solana none
           if cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy; then
             echo "SPIKE_ANCHOR_VERSION=0.30.1" | tee -a "$GITHUB_ENV"
-            echo "### COMPAT OK: anchor-lang 0.30.1 + ephemeral-rollups-sdk 0.17.3 (anchor-compat) COMPILED ###"
+            echo "### COMPAT OK: anchor-lang 0.30.1 + ephemeral-vrf-sdk 0.2.3 COMPILED ###" | tee -a "$GITHUB_STEP_SUMMARY"
           else
-            echo "### COMPAT BLOCKER: 0.30.1 did not compile; retrying with 0.31.1 ###" | tee -a "$GITHUB_STEP_SUMMARY"
-            node scripts/vrf-spike-patch-manifest.mjs --anchor 0.31.1 --pin-solana none
+            echo "### COMPAT BLOCKER: 0.2.3 did not compile on anchor 0.30.1; retrying on 0.31.1 to still answer the RUNTIME question ###" | tee -a "$GITHUB_STEP_SUMMARY"
+            node scripts/vrf-spike-patch-manifest.mjs --sdk 0.2.3 --anchor 0.31.1 --pin-solana none
             cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy
             echo "SPIKE_ANCHOR_VERSION=0.31.1" | tee -a "$GITHUB_ENV"
           fi
           test -f target/deploy/vrf_spike.so || { echo "vrf_spike.so missing" >&2; exit 1; }
           echo "SPIKE_PROGRAM_SIZE_BYTES=$(stat -c %s target/deploy/vrf_spike.so)" | tee -a "$GITHUB_ENV"
+          echo "--- resolved versions in the spike graph ---"
+          grep -A1 'name = "anchor-lang"' programs/vrf-spike/Cargo.lock || true
+          grep -A1 'name = "solana-program"' programs/vrf-spike/Cargo.lock || true
+          grep -A1 'name = "ephemeral-vrf-sdk"' programs/vrf-spike/Cargo.lock || true
 
       - name: Build the roulette program for the size baseline (NEVER deployed here)
         run: |
