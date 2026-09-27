@@ -24,16 +24,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - variant: sdk-0.2.3-git__anchor-0.30.1__pinned-solana
+          - variant: sdk-0.2.3-vendored__anchor-0.30.1
             line: vrf
+            source: vendor
             anchor: "0.30.1"
-            pin: "1.18.26"
+            pin: "none"
           - variant: sdk-0.2.3-git__anchor-0.30.1
             line: vrf
+            source: git
             anchor: "0.30.1"
             pin: "none"
           - variant: sdk-0.17.3__anchor-0.30.1
             line: rollups
+            source: git
             anchor: "0.30.1"
             pin: "none"
     steps:
@@ -47,11 +50,15 @@ jobs:
       - name: Install cargo-build-sbf (4.4.0)
         run: cargo install cargo-build-sbf --version 4.4.0 --locked && cargo-build-sbf --version
 
+      - name: Vendor the published (yanked) 0.2.3 tarballs
+        if: matrix.source == 'vendor'
+        run: sh ./scripts/vrf-spike-vendor-sdk.sh /tmp/vendor
+
       - name: Apply manifest variant
         run: |
-          node scripts/vrf-spike-patch-manifest.mjs --line "${{ matrix.line }}" --anchor "${{ matrix.anchor }}" --pin-solana "${{ matrix.pin }}"
+          node scripts/vrf-spike-patch-manifest.mjs --line "${{ matrix.line }}" --source "${{ matrix.source }}" --anchor "${{ matrix.anchor }}" --pin-solana "${{ matrix.pin }}"
           sed -n '/^\[features\]/,/^\[dependencies\]/p' programs/vrf-spike/Cargo.toml
-          grep '^anchor-lang\|^solana-program\|^ephemeral-' programs/vrf-spike/Cargo.toml
+          grep '^anchor-lang\|^solana-program\|^ephemeral-\|^\[patch' programs/vrf-spike/Cargo.toml
 
       - name: Build spike
         run: |
@@ -158,11 +165,25 @@ jobs:
       - name: Build the spike
         run: |
           rm -f programs/vrf-spike/Cargo.lock
-          node scripts/vrf-spike-patch-manifest.mjs --line rollups --anchor 0.32.2 --pin-solana none
-          cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy
+          # PREFER the configuration roulette actually needs: anchor-lang 0.30.1
+          # with the published 0.2.3 SDK line. Fall back to the current,
+          # non-yanked 0.17.3 line on a newer Anchor purely to still answer the
+          # RUNTIME question — and say so loudly, because the fallback's Anchor
+          # version has no bearing on whether MagicBlock works.
+          sh ./scripts/vrf-spike-vendor-sdk.sh /tmp/vendor
+          node scripts/vrf-spike-patch-manifest.mjs --line vrf --source vendor --anchor 0.30.1 --pin-solana none
+          if cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy; then
+            echo "SPIKE_SDK=vendored-0.2.3 + anchor 0.30.1" | tee -a "$GITHUB_ENV"
+            echo "### built on the TARGET anchor 0.30.1 with the published 0.2.3 SDK ###" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### 0.2.3 did not build on anchor 0.30.1; falling back to 0.17.3 on 0.32.2 for the RUNTIME test only ###" | tee -a "$GITHUB_STEP_SUMMARY"
+            node scripts/vrf-spike-patch-manifest.mjs --line rollups --source git --anchor 0.32.2 --pin-solana none
+            cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy
+            echo "SPIKE_SDK=rollups-0.17.3 + anchor 0.32.2" | tee -a "$GITHUB_ENV"
+          fi
           test -f target/deploy/vrf_spike.so || { echo "vrf_spike.so missing" >&2; exit 1; }
           echo "SPIKE_PROGRAM_SIZE_BYTES=$(stat -c %s target/deploy/vrf_spike.so)" | tee -a "$GITHUB_ENV"
-          for c in anchor-lang solana-program ephemeral-rollups-sdk; do
+          for c in anchor-lang solana-program ephemeral-vrf-sdk ephemeral-rollups-sdk; do
             grep -A1 "name = \"$c\"" programs/vrf-spike/Cargo.lock || true
           done
 
@@ -211,6 +232,7 @@ jobs:
         run: |
           {
             echo "### VRF SPIKE SUMMARY"
+            echo "- SDK build: \`${{ env.SPIKE_SDK }}\`"
             echo "- spike .so size: \`${{ env.SPIKE_PROGRAM_SIZE_BYTES }}\` bytes"
             echo "- roulette .so size (baseline): \`${{ env.ROULETTE_PROGRAM_SIZE_BYTES }}\` bytes"
             echo "- spike program id: \`${{ env.SPIKE_PROGRAM_ID }}\`"
