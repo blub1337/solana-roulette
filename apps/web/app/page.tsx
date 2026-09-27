@@ -7,6 +7,7 @@ import { useRuntime } from "../hooks/useRuntime";
 import { useSse } from "../hooks/useSse";
 import { ModeBanner } from "../components/ModeBanner";
 import { DevnetBadge } from "../components/DevnetBadge";
+import { BrandLogo, BRAND_NAME } from "../components/BrandLogo";
 import { TIER_META, TIER_COUNT, type Tier } from "@solana-roulette/types";
 
 function lamportsToSol(lamports: string | null | undefined): string {
@@ -42,7 +43,8 @@ export default function Home() {
             7.5% platform fee
           </span>
         </div>
-        <h1 className="hero-title">SOL ROULETTE</h1>
+        <BrandLogo className="brand-hero h-20 w-auto sm:h-24 lg:h-28" />
+        <h1 className="hero-title mt-4">SOLROLL</h1>
         <p className="mx-auto mt-4 max-w-2xl text-ivory/70">
           Three independent pools. Every stake is weighted by its size, the pot closes
           automatically at its limit, and the winner is determined deterministically —
@@ -203,13 +205,18 @@ export default function Home() {
         ))}
       </section>
 
-      <footer className="mt-12 border-t border-felt-700 pt-6 text-center text-xs text-ivory/40">
-        DEVNET demonstration. No real-money wagering. The winner is determined by the
-        runtime and is independently verifiable — see{" "}
-        <Link href="/admin" className="text-gold-400 hover:text-gold-300">
-          the audit monitor
-        </Link>{" "}
-        and docs/VERIFICATION.md.
+      <footer className="mt-12 border-t border-felt-700 pt-6">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <BrandLogo className="h-10 w-auto opacity-90" />
+          <p className="text-xs text-ivory/40">
+            {BRAND_NAME} · DEVNET demonstration. No real-money wagering. The winner is determined
+            by the runtime and is independently verifiable — see{" "}
+            <Link href="/admin" className="text-gold-400 hover:text-gold-300">
+              the audit monitor
+            </Link>{" "}
+            and docs/VERIFICATION.md.
+          </p>
+        </div>
       </footer>
     </main>
   );
