@@ -137,17 +137,16 @@ jobs:
               -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBalance\",\"params\":[\"$ADDR\"]}" \
               | grep -o '"value":[0-9]*' | head -1 | cut -d: -f2
           }
-          # A fresh program id needs rent-exempt SOL for the programdata
-          # account, roughly 0.7-1.1 SOL for a program this size, and the two
-          # VRF requests cost ~0.0011 SOL. 1.2 SOL is the floor that still
-          # leaves room for the request fees; the faucet is rate limited, so
-          # topping up is best effort and never the reason a run fails.
-          for i in 1 2 3 4 5 6; do
+          # A program deploy (or upgrade) needs rent for the buffer/programdata
+          # (~1-1.5 SOL for this ELF) plus ~0.0011 SOL for two VRF requests.
+          # The faucet rate limits per IP; a fresh runner usually has headroom,
+          # but retry generously before giving up.
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
             B=$(bal_lamports)
             echo "devnet balance: ${B:-0} lamports"
             if [ "${B:-0}" -ge 1200000000 ]; then echo "enough for a deploy"; break; fi
             solana airdrop 2 "$ADDR" --url "$SOLANA_URL" || true
-            sleep 20
+            sleep 30
           done
           FINAL=$(bal_lamports)
           echo "final devnet balance: ${FINAL:-0} lamports"
@@ -223,13 +222,15 @@ jobs:
           SOLANA_RPC_URL: https://api.devnet.solana.com
         run: |
           npm install --no-save @solana/web3.js >/dev/null 2>&1
-          node scripts/vrf-spike-request.mjs \
-            --program "$SPIKE_PROGRAM_ID" \
-            --keypair ~/.config/solana/id.json \
-            --requests 2 \
-            --timeout 300000 2>&1 | tee /tmp/vrf-spike-request.log
+          # Two sequential REAL requests, each awaited to REAL fulfillment.
+          # scripts/vrf-spike-second-round.mjs is the proven end-to-end path:
+          # it sends with no preflight games, surfaces raw provider errors,
+          # and only exits 0 when the VRF program's callback actually landed.
+          set -e
+          node scripts/vrf-spike-second-round.mjs 45 0 240000 2>&1 | tee /tmp/vrf-spike-r1.log
+          node scripts/vrf-spike-second-round.mjs 46 1 240000 2>&1 | tee /tmp/vrf-spike-r2.log
           echo "###VRF-SPIKE-RESULT###"
-          sed -n '/###VRF-SPIKE-RESULT###/,/###END###/p' /tmp/vrf-spike-request.log
+          grep -hE "REQUEST_TX|FULFILLMENT_TX|identity check|state:|request cost|request slot|slot .* after" /tmp/vrf-spike-r1.log /tmp/vrf-spike-r2.log || true
           echo "###END###"
 
       - name: Summary
@@ -242,3 +243,5 @@ jobs:
             echo "- roulette .so size (baseline): \`${{ env.ROULETTE_PROGRAM_SIZE_BYTES }}\` bytes"
             echo "- spike program id: \`${{ env.SPIKE_PROGRAM_ID }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+          # Keep the evidence logs in the archive even when a later step fails.
+          if [ -f /tmp/vrf-spike-r1.log ]; then cp /tmp/vrf-spike-r1.log /tmp/vrf-spike-r2.log . 2>/dev/null || true; fi
