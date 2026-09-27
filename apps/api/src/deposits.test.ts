@@ -420,3 +420,286 @@ describe("canonical deposit message (unchanged contract)", () => {
     expect(msg).toContain("11111111111111111111111111111112");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Program deposit path (chain mode): the client signs the program's `deposit`
+// instruction, which moves lamports AND writes the Participant PDA. The
+// server verifies the instruction, the escrow CPI and the resulting PDA.
+// ---------------------------------------------------------------------------
+
+import { TransactionInstruction, SystemProgram } from "@solana/web3.js";
+import { depositIx } from "@solana-roulette/sdk";
+import { getParticipantPda, getRoundPda, getEscrowPda, PARTICIPANT_SPACE } from "@solana-roulette/verification";
+import { checkProgramDeposit } from "./onchain.js";
+
+/** Encode a Participant PDA the way the program writes it. */
+function encodeParticipant(p: {
+  round: PublicKey;
+  wallet: PublicKey;
+  amount: bigint;
+  weightStart: bigint;
+  index: number;
+  bump: number;
+}): Uint8Array {
+  const buf = Buffer.alloc(PARTICIPANT_SPACE);
+  buf.set(p.round.toBuffer(), 8);
+  buf.set(p.wallet.toBuffer(), 40);
+  buf.writeBigUInt64LE(p.amount, 72);
+  buf.writeBigUInt64LE(p.weightStart & 0xffffffffffffffffn, 80);
+  // weight_start is u128; low 8 bytes suffice for test values
+  buf.writeUInt32LE(p.index, 96);
+  buf.writeUInt8(p.bump, 100);
+  return buf;
+}
+
+/**
+ * A fake parsed tx that looks like a program `deposit` invocation: the
+ * roulette program instruction (raw, base58 data) plus the escrow CPI it
+ * performed, and the fee payer is the depositor.
+ */
+function programDepositTx(opts: {
+  from: PublicKey;
+  escrow: PublicKey;
+  programId: PublicKey;
+  lamports: bigint;
+  err?: unknown;
+  includeInstruction?: boolean;
+}): ParsedTransactionWithMeta {
+  const signature = "S".repeat(64);
+  const ixData = depositIx(opts.programId, opts.from, 1n, opts.lamports);
+  const base58 = require("bs58").default ?? require("bs58");
+  const instructions: ParsedTransactionWithMeta["transaction"]["message"]["instructions"] = [];
+  if (opts.includeInstruction !== false) {
+    instructions.push({
+      programId: ixData.programId,
+      accounts: ixData.keys.map((k) => k.pubkey),
+      data: base58.encode(ixData.data),
+    } as never);
+  }
+  instructions.push({
+    program: "system",
+    parsed: {
+      type: "transfer",
+      info: {
+        source: opts.from.toBase58(),
+        destination: opts.escrow.toBase58(),
+        lamports: Number(opts.lamports),
+      },
+    },
+  } as never);
+  return {
+    slot: 1,
+    blockTime: Math.floor(Date.now() / 1000),
+    signature,
+    meta: { err: opts.err ?? null, fee: 5000, logMessages: [], innerInstructions: [] },
+    transaction: {
+      signatures: [signature],
+      message: {
+        accountKeys: [
+          { pubkey: opts.from, signer: true, writable: true },
+          { pubkey: opts.escrow, signer: false, writable: true },
+          { pubkey: opts.programId, signer: false, writable: false },
+        ],
+        instructions,
+        recentBlockhash: "11111111111111111111111111111111",
+      },
+    },
+  } as unknown as ParsedTransactionWithMeta;
+}
+
+describe("program deposit verification (chain mode)", () => {
+  const roundId = 900n;
+  const player = Keypair.fromSeed(new Uint8Array(32).fill(77)).publicKey;
+  const [roundPda] = getRoundPda(PROGRAM_ID, roundId);
+  const escrow = getEscrowPda(PROGRAM_ID, roundPda)[0];
+  const participantPda = getParticipantPda(PROGRAM_ID, roundPda, player)[0];
+
+  function programHarness(opts: {
+    round?: Partial<RoundData>;
+    tx?: ParsedTransactionWithMeta | null;
+    participant?: Uint8Array | null;
+  }) {
+    const round = makeRound({ id: roundId, ...opts.round });
+    const backend: ChainBackend = {
+      mode: "chain",
+      realFunds: true,
+      async getRound() {
+        return round;
+      },
+      async getParticipants(): Promise<ParticipantData[]> {
+        return [];
+      },
+      async getGlobalConfig(): Promise<GlobalConfigData | null> {
+        return null;
+      },
+      async getCurrentSlot() {
+        return 1n;
+      },
+      async getRevealBlockhash() {
+        return null;
+      },
+      async getHeadByTier() {
+        return [roundId, 0n, 0n];
+      },
+      async runLifecycle() {
+        return null;
+      },
+      // In chain mode the program already credited the round; this must
+      // NOT be called.
+      async deposit() {
+        throw new Error("backend.deposit must not be called in chain mode");
+      },
+      treasuryAccrued() {
+        return 0n;
+      },
+    };
+    const connection = {
+      getParsedTransaction: async () => (opts.tx === undefined ? null : opts.tx),
+      getAccountInfo: async () =>
+        opts.participant === null
+          ? null
+          : {
+              owner: PROGRAM_ID,
+              data: opts.participant!,
+              executable: false,
+              lamports: 1_600_000,
+              rentEpoch: 0n,
+            },
+      getBalance: async () => 0,
+      getSlot: async () => 1,
+    } as unknown as Connection;
+    const operator = Keypair.fromSeed(new Uint8Array(32).fill(9));
+    const custody: Custody = {
+      network: "devnet",
+      cluster: "devnet",
+      rpcUrl: "https://api.devnet.solana.com",
+      escrow,
+      feeWallet: FEE_WALLET,
+      signer: operator,
+      signerAddress: operator.publicKey.toBase58(),
+      ready: true,
+      reason: "test",
+    };
+    const cfg = resolveConfig({ PLATFORM_FEE_WALLET: FEE_WALLET.toBase58() } as NodeJS.ProcessEnv);
+    return { deps: { backend, connection, custody, cfg, programId: PROGRAM_ID }, round };
+  }
+
+  it("credits a real program deposit: instruction + escrow CPI + Participant PDA all match", async () => {
+    const amount = 250_000_000n;
+    const tx = programDepositTx({ from: player, escrow, programId: PROGRAM_ID, lamports: amount });
+    const participant = encodeParticipant({
+      round: roundPda,
+      wallet: player,
+      amount,
+      weightStart: 0n,
+      index: 3,
+      bump: 250,
+    });
+    const h = programHarness({ tx, participant, round: { pot: 250_000_000n, participantCount: 4 } });
+    const intent = await createDepositIntent(h.deps, { roundId, wallet: player, amountLamports: amount });
+    const res = await confirmDeposit(h.deps, { depositId: intent.depositId, signature: "S".repeat(64) });
+    expect(res.status).toBe(200);
+    expect(res.body.credited).toBe(true);
+    expect(h.round.pot).toBe(250_000_000n); // re-read from chain, untouched locally
+  });
+
+  it("does NOT credit a plain System transfer with no program instruction", async () => {
+    const amount = 250_000_000n;
+    const tx = programDepositTx({
+      from: player,
+      escrow,
+      programId: PROGRAM_ID,
+      lamports: amount,
+      includeInstruction: false,
+    });
+    const participant = encodeParticipant({
+      round: roundPda,
+      wallet: player,
+      amount,
+      weightStart: 0n,
+      index: 0,
+      bump: 250,
+    });
+    const h = programHarness({ tx, participant });
+    const intent = await createDepositIntent(h.deps, { roundId: 901n, wallet: player, amountLamports: amount });
+    const res = await confirmDeposit(h.deps, { depositId: intent.depositId, signature: "S".repeat(64) });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("no_program_deposit");
+  });
+
+  it("does NOT credit when the Participant PDA was not created", async () => {
+    const amount = 250_000_000n;
+    const escrow902 = getEscrowPda(PROGRAM_ID, 902n)[0];
+    const tx = programDepositTx({ from: player, escrow: escrow902, programId: PROGRAM_ID, lamports: amount });
+    const h = programHarness({ tx, participant: null });
+    const intent = await createDepositIntent(h.deps, { roundId: 902n, wallet: player, amountLamports: amount });
+    const res = await confirmDeposit(h.deps, { depositId: intent.depositId, signature: "S".repeat(64) });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("participant_missing");
+  });
+
+  it("does NOT credit when the Participant PDA records a different amount", async () => {
+    const amount = 250_000_000n;
+    const escrow903 = getEscrowPda(PROGRAM_ID, 903n)[0];
+    const roundPda903 = getRoundPda(PROGRAM_ID, 903n)[0];
+    const tx = programDepositTx({ from: player, escrow: escrow903, programId: PROGRAM_ID, lamports: amount });
+    const participant = encodeParticipant({
+      round: roundPda903,
+      wallet: player,
+      amount: 100_000_000n,
+      weightStart: 0n,
+      index: 0,
+      bump: 250,
+    });
+    const h = programHarness({ tx, participant });
+    const intent = await createDepositIntent(h.deps, { roundId: 903n, wallet: player, amountLamports: amount });
+    const res = await confirmDeposit(h.deps, { depositId: intent.depositId, signature: "S".repeat(64) });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("participant_amount_mismatch");
+  });
+
+  it("does NOT credit a program deposit funded from another wallet", async () => {
+    const attacker = Keypair.fromSeed(new Uint8Array(32).fill(78)).publicKey;
+    const amount = 250_000_000n;
+    // Attacker pays into escrow, but the fee payer is the attacker, not our player.
+    const tx = programDepositTx({ from: attacker, escrow, programId: PROGRAM_ID, lamports: amount });
+    const h = programHarness({ tx, participant: encodeParticipant({ round: roundPda, wallet: player, amount, weightStart: 0n, index: 0, bump: 250 }) });
+    const intent = await createDepositIntent(h.deps, { roundId: 904n, wallet: player, amountLamports: amount });
+    const res = await confirmDeposit(h.deps, { depositId: intent.depositId, signature: "S".repeat(64) });
+    expect(res.status).toBe(422);
+    expect(res.body.error).toBe("unexpected_fee_payer");
+  });
+
+  it("checkProgramDeposit rejects a wrong discriminator", async () => {
+    const amount = 250_000_000n;
+    // lock_round ix instead of deposit
+    const wrongIx = new TransactionInstruction({
+      programId: PROGRAM_ID,
+      keys: [],
+      data: Buffer.concat([Buffer.from([1, 2, 3, 4, 5, 6, 7, 8])]),
+    });
+    const base58 = (require("bs58").default ?? require("bs58")) as { encode: (b: Buffer) => string };
+    const tx = programDepositTx({ from: player, escrow, programId: PROGRAM_ID, lamports: amount });
+    (tx.transaction.message as unknown as { instructions: unknown[] }).instructions = [
+      { programId: PROGRAM_ID, accounts: [], data: base58.encode(wrongIx.data) },
+      {
+        program: "system",
+        parsed: { type: "transfer", info: { source: player.toBase58(), destination: escrow.toBase58(), lamports: Number(amount) } },
+      },
+    ];
+    const conn = {
+      getParsedTransaction: async () => tx,
+      getAccountInfo: async () => null,
+    } as unknown as Connection;
+    const check = await checkProgramDeposit(conn, {
+      signature: "S".repeat(64),
+      programId: PROGRAM_ID,
+      roundId,
+      wallet: player,
+      escrow,
+      amount,
+    });
+    expect(check.ok).toBe(false);
+    if (!check.ok) expect(check.code).toBe("no_program_deposit");
+  });
+});
