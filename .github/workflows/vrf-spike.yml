@@ -24,6 +24,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - variant: sdk-0.2.3-vendored__anchor-0.30.1__pinned-solana
+            line: vrf
+            source: vendor
+            anchor: "0.30.1"
+            pin: "1.18.26"
           - variant: sdk-0.2.3-vendored__anchor-0.30.1
             line: vrf
             source: vendor
@@ -171,9 +176,9 @@ jobs:
           # RUNTIME question — and say so loudly, because the fallback's Anchor
           # version has no bearing on whether MagicBlock works.
           sh ./scripts/vrf-spike-vendor-sdk.sh /tmp/vendor
-          node scripts/vrf-spike-patch-manifest.mjs --line vrf --source vendor --anchor 0.30.1 --pin-solana none
+          node scripts/vrf-spike-patch-manifest.mjs --line vrf --source vendor --anchor 0.30.1 --pin-solana 1.18.26
           if cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy; then
-            echo "SPIKE_SDK=vendored-0.2.3 + anchor 0.30.1" | tee -a "$GITHUB_ENV"
+            echo "SPIKE_SDK=vendored-0.2.3 + anchor 0.30.1 + solana-program 1.18.26" | tee -a "$GITHUB_ENV"
             echo "### built on the TARGET anchor 0.30.1 with the published 0.2.3 SDK ###" | tee -a "$GITHUB_STEP_SUMMARY"
           else
             echo "### 0.2.3 did not build on anchor 0.30.1; falling back to 0.17.3 on 0.32.2 for the RUNTIME test only ###" | tee -a "$GITHUB_STEP_SUMMARY"
