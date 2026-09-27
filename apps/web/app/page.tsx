@@ -43,7 +43,10 @@ export default function Home() {
             7.5% platform fee
           </span>
         </div>
-        <BrandLogo className="brand-hero h-20 w-auto sm:h-24 lg:h-28" />
+        <BrandLogo
+          className="h-20 w-auto sm:h-24 lg:h-28"
+          fallbackClassName="hero-title text-5xl sm:text-6xl lg:text-7xl py-2"
+        />
         <h1 className="hero-title mt-4">SOLROLL</h1>
         <p className="mx-auto mt-4 max-w-2xl text-ivory/70">
           Three independent pools. Every stake is weighted by its size, the pot closes
@@ -207,7 +210,10 @@ export default function Home() {
 
       <footer className="mt-12 border-t border-felt-700 pt-6">
         <div className="flex flex-col items-center gap-3 text-center">
-          <BrandLogo className="h-10 w-auto opacity-90" />
+          <BrandLogo
+            className="h-10 w-auto opacity-90"
+            fallbackClassName="text-lg"
+          />
           <p className="text-xs text-ivory/40">
             {BRAND_NAME} · DEVNET demonstration. No real-money wagering. The winner is determined
             by the runtime and is independently verifiable — see{" "}
