@@ -10,12 +10,13 @@ crate-type = ["cdylib", "lib"]
 name = "vrf_spike"
 
 [features]
-default = ["sdk-vrf"]
-# VRF SDK line: ephemeral-vrf-sdk v0.2.3 (git tag).
+# VRF SDK line: ephemeral-vrf-sdk 0.2.3.
 # The only published line whose dependency graph coexists with anchor-lang
 # 0.30.1 — but EVERY release in it (0.1.0 .. 0.2.3) is YANKED from crates.io,
-# so it is consumed from git, which is not subject to registry yanking.
+# so it is consumed from its published tarball or its git tag, neither of
+# which is subject to registry yanking.
 sdk-vrf = ["dep:ephemeral-vrf-sdk"]
+default = ["sdk-vrf"]
 
 no-entrypoint = []
 no-idl = []
@@ -30,9 +31,3 @@ cpi = ["no-entrypoint"]
 anchor-lang = { version = "=0.30.1", features = ["init-if-needed"] }
 ephemeral-vrf-sdk = { git = "https://github.com/magicblock-labs/ephemeral-vrf", tag = "v0.2.3", features = ["anchor"], optional = true }
 
-# NOTE: this manifest may contain exactly ONE VRF SDK line. `cargo metadata`
-# (which cargo-build-sbf invokes) resolves every DECLARED optional dependency
-# regardless of enabled features, so simply disabling the other line still
-# drags its solana-program 3.0 into the graph. Use
-# scripts/vrf-spike-patch-manifest.mjs --line rollups to swap lines; it
-# rewrites this file in place.
