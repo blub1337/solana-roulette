@@ -1,0 +1,27 @@
+[package]
+name = "vrf-spike"
+version = "0.0.0"
+description = "THROWAWAY MagicBlock SolanaVrf feasibility spike. Never deployed with, and never a dependency of, the roulette program."
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "vrf_spike"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+# THE COMPATIBILITY PROOF. The money-moving roulette program is pinned to
+# anchor-lang 0.30.1 and this spike deliberately uses the SAME version, so a
+# successful build here is direct evidence that MagicBlock can be added to
+# roulette without an Anchor upgrade.
+anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
+# `anchor` -> anchor-modern -> anchor-lang ^1.0 (would FORCE an Anchor upgrade).
+# `anchor-compat` -> anchor-lang >=0.28.0, <1.0.0 (includes 0.30.1).
+ephemeral-rollups-sdk = { version = "=0.17.3", features = ["vrf", "anchor-compat"] }
