@@ -17,12 +17,14 @@ const VRF_PROGRAM = new PublicKey("Vrf1RNUjXmQGjmQrQLvJHs9SNkvDJEsRVFPkfSQUwGz")
 const QUEUE = new PublicKey("Cuj97ggrhhidhbu39TijNVqE74xvKJ69gDervRUXAxGh");
 const SLOT_HASHES = new PublicKey("SysvarS1otHashes111111111111111111111111111");
 const GLOBAL_IDENTITY = new PublicKey("9irBy75QS2BN81FUgXuHcjqceJJRuc9oDkAe8TKVvvAw");
-const PROGRAM_ID = new PublicKey("HRdbK1k8XXQCcJDfeT8ihL4f7eLkiBKkEWmGJ95GaiRC");
+// Live spike program deployed by the CI workflow (run 36305236310). Overridable.
+const PROGRAM_ID = new PublicKey(process.argv[5] ?? "HRdbK1k8XXQCcJDfeT8ihL4f7eLkiBKkEWmGJ95GaiRC");
+// The deployer keypair path differs between CI (~/.config/solana/id.json) and
+// the sandbox (operator-devnet.key.json); allow both.
+const KEYPAIR_PATH = process.env.SPIKE_KEYPAIR ?? "operator-devnet.key.json";
 
 const c = new Connection(RPC, "confirmed");
-const payer = Keypair.fromSecretKey(
-  Uint8Array.from(JSON.parse(fs.readFileSync("operator-devnet.key.json", "utf8"))),
-);
+const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(KEYPAIR_PATH, "utf8"))));
 const [state] = PublicKey.findProgramAddressSync([Buffer.from("state")], PROGRAM_ID);
 const [identity] = PublicKey.findProgramAddressSync([Buffer.from("identity")], PROGRAM_ID);
 const disc = (m) => createHash("sha256").update(`global:${m}`).digest().subarray(0, 8);
