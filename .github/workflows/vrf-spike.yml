@@ -119,16 +119,22 @@ jobs:
               -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBalance\",\"params\":[\"$ADDR\"]}" \
               | grep -o '"value":[0-9]*' | head -1 | cut -d: -f2
           }
-          for i in 1 2 3 4 5 6 7 8; do
+          # A fresh program id needs rent-exempt SOL for the programdata
+          # account, roughly 0.7-1.1 SOL for a program this size, and the two
+          # VRF requests cost ~0.0011 SOL. 1.2 SOL is the floor that still
+          # leaves room for the request fees; the faucet is rate limited, so
+          # topping up is best effort and never the reason a run fails.
+          for i in 1 2 3 4 5 6; do
             B=$(bal_lamports)
             echo "devnet balance: ${B:-0} lamports"
-            if [ "${B:-0}" -ge 4000000000 ]; then echo funded; break; fi
+            if [ "${B:-0}" -ge 1200000000 ]; then echo "enough for a deploy"; break; fi
             solana airdrop 2 "$ADDR" --url "$SOLANA_URL" || true
-            sleep 15
+            sleep 20
           done
           FINAL=$(bal_lamports)
-          if [ "${FINAL:-0}" -lt 4000000000 ]; then
-            echo "NOT ENOUGH DEVNET SOL" >&2; exit 1
+          echo "final devnet balance: ${FINAL:-0} lamports"
+          if [ "${FINAL:-0}" -lt 1200000000 ]; then
+            echo "NOT ENOUGH DEVNET SOL for a program deploy (need >= 1.2 SOL)" >&2; exit 1
           fi
 
       - name: Derive the THROWAWAY spike keypair
