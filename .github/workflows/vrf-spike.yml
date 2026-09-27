@@ -1,0 +1,208 @@
+name: VRF spike (MagicBlock SolanaVrf feasibility)
+
+# THROWAWAY, ISOLATED. Nothing in this workflow builds, deploys or modifies
+# programs/roulette — the money-moving program is never redeployed from here.
+# The spike program has its own keypair, its own id and its own state.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. COMPATIBILITY. Does anchor-lang 0.30.1 compile against
+  #    ephemeral-rollups-sdk 0.17.3 with `anchor-compat`, without an upgrade?
+  # ---------------------------------------------------------------------
+  build:
+    name: build ${{ matrix.variant }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: anchor-0.30.1
+            anchor: "0.30.1"
+            pin: "none"
+          - variant: anchor-0.30.1-pinned-solana
+            anchor: "0.30.1"
+            pin: "1.18.26"
+          - variant: anchor-0.31.1
+            anchor: "0.31.1"
+            pin: "none"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Setup Solana CLI (Anza stable)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)" || \
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - name: Install cargo-build-sbf (4.4.0)
+        run: cargo install cargo-build-sbf --version 4.4.0 --locked && cargo-build-sbf --version
+
+      - name: Apply manifest variant
+        run: |
+          npm install --no-save tweetnacl >/dev/null 2>&1
+          node scripts/vrf-spike-patch-manifest.mjs --anchor "${{ matrix.anchor }}" --pin-solana "${{ matrix.pin }}"
+          cat programs/vrf-spike/Cargo.toml
+
+      - name: Build spike
+        run: |
+          rm -f programs/vrf-spike/Cargo.lock
+          cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy
+          test -f target/deploy/vrf_spike.so || { echo "vrf_spike.so missing" >&2; exit 1; }
+          SZ=$(stat -c %s target/deploy/vrf_spike.so)
+          echo "SPIKE_PROGRAM_SIZE_BYTES=$SZ" | tee -a "$GITHUB_ENV"
+          echo "spike .so size: $SZ bytes ($(( SZ / 1024 )) KiB)"
+          if [ "$SZ" -gt 368640 ]; then echo "WARNING: exceeds the 360 KiB SBF program limit" >&2; fi
+
+      - name: Report resolved versions
+        if: always()
+        run: |
+          echo "--- resolved anchor-lang / solana-program in the spike graph ---"
+          grep -A1 'name = "anchor-lang"' programs/vrf-spike/Cargo.lock || true
+          grep -A1 'name = "solana-program"' programs/vrf-spike/Cargo.lock || true
+          grep -A1 'name = "ephemeral-rollups-sdk"' programs/vrf-spike/Cargo.lock || true
+
+      - name: Build the roulette program too (size baseline only, never deployed)
+        if: always()
+        run: |
+          cargo build-sbf --manifest-path programs/roulette/Cargo.toml --sbf-out-dir target/deploy-roulette || true
+          if [ -f target/deploy-roulette/roulette.so ]; then
+            echo "ROULETTE_PROGRAM_SIZE_BYTES=$(stat -c %s target/deploy-roulette/roulette.so)"
+          fi
+
+  # ---------------------------------------------------------------------
+  # 2. REAL DEVNET TEST. Deploys ONLY the spike, issues a REAL
+  #    RequestRandomness against DEFAULT_QUEUE and waits for the REAL
+  #    oracle fulfillment.
+  # ---------------------------------------------------------------------
+  devnet:
+    name: real devnet request
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    env:
+      SOLANA_URL: https://api.devnet.solana.com
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Setup Solana CLI (Anza stable)
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)" || \
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - name: Install cargo-build-sbf (4.4.0)
+        run: cargo install cargo-build-sbf --version 4.4.0 --locked && cargo-build-sbf --version
+
+      - name: Import operator keypair (spike deployer only)
+        env:
+          OPERATOR_KEYPAIR_B64: ${{ secrets.OPERATOR_KEYPAIR_B64 }}
+        run: |
+          if [ -z "$OPERATOR_KEYPAIR_B64" ]; then
+            echo "SECRET MISSING: OPERATOR_KEYPAIR_B64" >&2
+            exit 1
+          fi
+          mkdir -p ~/.config/solana
+          printf '%s' "$OPERATOR_KEYPAIR_B64" | base64 -d > ~/.config/solana/id.json
+          chmod 600 ~/.config/solana/id.json
+          solana-keygen pubkey ~/.config/solana/id.json
+
+      - name: Ensure the deployer has devnet SOL
+        run: |
+          ADDR=$(solana-keygen pubkey ~/.config/solana/id.json)
+          bal_lamports() {
+            curl -s "$SOLANA_URL" -X POST -H "Content-Type: application/json" \
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getBalance\",\"params\":[\"$ADDR\"]}" \
+              | grep -o '"value":[0-9]*' | head -1 | cut -d: -f2
+          }
+          for i in 1 2 3 4 5 6 7 8; do
+            B=$(bal_lamports)
+            echo "devnet balance: ${B:-0} lamports"
+            if [ "${B:-0}" -ge 4000000000 ]; then echo "funded"; break; fi
+            solana airdrop 2 "$ADDR" --url "$SOLANA_URL" || true
+            sleep 15
+          done
+          FINAL=$(bal_lamports)
+          if [ "${FINAL:-0}" -lt 4000000000 ]; then
+            echo "NOT ENOUGH DEVNET SOL" >&2; exit 1
+          fi
+
+      - name: Derive the THROWAWAY spike keypair
+        env:
+          OPERATOR_KEYPAIR_B64: ${{ secrets.OPERATOR_KEYPAIR_B64 }}
+        run: |
+          npm install --no-save tweetnacl >/dev/null 2>&1
+          node scripts/vrf-spike-derive-deploy.mjs | tee /tmp/spike-id.txt
+          grep '^SPIKE_PROGRAM_ID=' /tmp/spike-id.txt | cut -d= -f2 >> "$GITHUB_ENV"
+
+      # Prefer the 0.30.1 build. If — and only if — that fails, fall back to
+      # 0.31.1 so the RUNTIME question is still answered, and say loudly that
+      # the fallback happened (it is the Option B blocker if it is needed).
+      - name: Build the spike (prefer anchor 0.30.1)
+        run: |
+          rm -f programs/vrf-spike/Cargo.lock
+          node scripts/vrf-spike-patch-manifest.mjs --anchor 0.30.1 --pin-solana none
+          if cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy; then
+            echo "SPIKE_ANCHOR_VERSION=0.30.1" | tee -a "$GITHUB_ENV"
+            echo "### COMPAT OK: anchor-lang 0.30.1 + ephemeral-rollups-sdk 0.17.3 (anchor-compat) COMPILED ###"
+          else
+            echo "### COMPAT BLOCKER: 0.30.1 did not compile; retrying with 0.31.1 ###" | tee -a "$GITHUB_STEP_SUMMARY"
+            node scripts/vrf-spike-patch-manifest.mjs --anchor 0.31.1 --pin-solana none
+            cargo build-sbf --manifest-path programs/vrf-spike/Cargo.toml --sbf-out-dir target/deploy
+            echo "SPIKE_ANCHOR_VERSION=0.31.1" | tee -a "$GITHUB_ENV"
+          fi
+          test -f target/deploy/vrf_spike.so || { echo "vrf_spike.so missing" >&2; exit 1; }
+          echo "SPIKE_PROGRAM_SIZE_BYTES=$(stat -c %s target/deploy/vrf_spike.so)" | tee -a "$GITHUB_ENV"
+
+      - name: Build the roulette program for the size baseline (NEVER deployed here)
+        run: |
+          cargo build-sbf --manifest-path programs/roulette/Cargo.toml --sbf-out-dir target/deploy-roulette || true
+          if [ -f target/deploy-roulette/roulette.so ]; then
+            echo "ROULETTE_PROGRAM_SIZE_BYTES=$(stat -c %s target/deploy-roulette/roulette.so)" | tee -a "$GITHUB_ENV"
+          fi
+
+      - name: Deploy the spike to devnet
+        run: |
+          solana program deploy target/deploy/vrf_spike.so \
+            --program-id target/deploy/vrf-spike-keypair.json \
+            --keypair ~/.config/solana/id.json \
+            --url "$SOLANA_URL" \
+            --output json
+          for i in $(seq 1 10); do
+            ACCT=$(curl -s "$SOLANA_URL" -X POST -H 'Content-Type: application/json' \
+              -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"getAccountInfo\",\"params\":[\"$SPIKE_PROGRAM_ID\",{\"encoding\":\"base64\"}]}" \
+              | grep -o '"executable":[a-z]*' | head -1)
+            if [ "$ACCT" = '"executable":true' ]; then
+              echo "spike program is live: $SPIKE_PROGRAM_ID (built with anchor $SPIKE_ANCHOR_VERSION)"
+              break
+            fi
+            echo "not visible yet (attempt $i: ${ACCT:-none})"; sleep 6
+          done
+
+      - name: REAL devnet VRF request + wait for fulfillment
+        env:
+          SOLANA_RPC_URL: https://api.devnet.solana.com
+        run: |
+          npm install --no-save @solana/web3.js >/dev/null 2>&1
+          node scripts/vrf-spike-request.mjs \
+            --program "$SPIKE_PROGRAM_ID" \
+            --keypair ~/.config/solana/id.json \
+            --lane both \
+            --timeout 300000 2>&1 | tee /tmp/vrf-spike-request.log
+          echo "###VRF-SPIKE-RESULT###"
+          sed -n '/###VRF-SPIKE-RESULT###/,/###END###/p' /tmp/vrf-spike-request.log
+          echo "###END###"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### VRF SPIKE SUMMARY"
+            echo "- anchor version used by the spike: \`${{ env.SPIKE_ANCHOR_VERSION }}\`"
+            echo "- spike .so size: \`${{ env.SPIKE_PROGRAM_SIZE_BYTES }}\` bytes"
+            echo "- roulette .so size (baseline): \`${{ env.ROULETTE_PROGRAM_SIZE_BYTES }}\` bytes"
+            echo "- spike program id: \`${{ env.SPIKE_PROGRAM_ID }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
