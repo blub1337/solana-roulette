@@ -225,16 +225,110 @@ OPEN → FULL → LOCKED → RANDOMNESS_REQUESTED   (lock_round: request_vrf CPI
 - **How the API verifies it:** unchanged — it reads `reveal_input` and
   recomputes entropy → ticket → winner → fee → payout.
 
-### 3.2 Open questions blocking that integration
+### 3.2 MagicBlock SolanaVrf Devnet spike — MEASURED (2026-09-27)
 
-1. Is a funded oracle fulfilling devnet requests in `DEFAULT_QUEUE` right now?
-   A request that is never fulfilled cannot be demonstrated, and a mock is not
-   acceptable.
-2. Program size / compute budget impact of pulling in `ephemeral-vrf-sdk`.
-3. Whether the `anchor` feature (→ `anchor-modern` → recent `anchor-lang`)
-   or `anchor-compat` is required to stay on 0.30.1.
-4. Callback CU: the existing `pick_winner` walks every participant, and a
-   callback that can fail is a liveness bug.
+A real devnet spike (throwaway program `HRdbK1k8XXQCcJDfeT8ihL4f7eLkiBKkEWmGJ95GaiRC`,
+never the roulette program) issued **real requests and received real
+fulfillments** from the live oracle network:
+
+| | |
+|---|---|
+| Request tx | `4juycEU9TyJWrm9fdt1zYqbTxsS9WPN4bxSWkCjKacatPrRjNBjZf7HRjzwSVeJEM8Le4GGwNifiv2Q8LX4CzrWV` (slot 504718210) |
+| Fulfillment tx | `2ZycTLD5xfUNu2xjnLfpnryFcyugVgdKZD2AA6DWMuN2xzC2Pt8VfUFg1FFJ5yQUneTNK8ZifvbUN6rhUMzDTCxQ` (slot 504718212, **2 slots later**) |
+| 2nd request | `58cWFQUqbAWxFQEvfMkQpNWYhz23hvJJASmJsC2J3EsudFS2pi7sTLBCzY3BBLVkeTqDqxQsE5xMTE27Qs8zFk9A` → `Gg9EdH9cCK9uUkLm1LwNFZgzgg2F4fhoVJ1HobBfmJ33GpMHciyYQPr8iedEE28pk2CUuLp2ckUJSCzNRKbcFWi` (**3 slots**) |
+| Randomness | `8c1cff8985f34f94dc7e5121e2667730497755b3746e612cb22c9a5a33d6bfbd`, `0aaf0c2f2143ddbfd18f4f160f3e1f330c45d5873c4710d5e736baaad576ffd9` |
+| Callback signer | scoped PDA `G57i3BvRTddqqyee3gt82eq9m6CsbKQaf4SY8hJF74BA` = `PDA(["identity", HRdb…], Vrf1RNUj…)` — derived independently, matches exactly |
+| Cost | **0.000525 SOL per request** (0.0005 fee into the queue + 0.000025 tx fee); the oracle pays fulfillment fees from that deposit |
+| CU | request ~29.9k (incl. 14.7k VRF CPI); fulfillment 54.3k/56.8k total, of which proof verification ≈ 28–30k, callback ≈ 26k |
+| Latency | **2–3 slots (~0.8–1.2 s)** — not the 10 s worst case the docs mention |
+| Sizes | spike .so 221,208 B; roulette .so 350,536 B (same toolchain) → VRF SDK adds roughly ~30–60 kB + one extra CPI in the callback |
+| Queue | `Cuj97ggrhhidhbu39TijNVqE74xvKJ69gDervRUXAxGh` live on devnet, oracle paying fulfillment fees from deposits |
+
+Live-proven mechanics the docs under-specify:
+
+1. **The oracle removes the request from the queue BEFORE the callback runs**
+   (measured: an identity mismatch on our first attempts — scoped request,
+   global-identity callback — produced `RandomnessRequestNotFound (0x1)`
+   fulfillment failures, and the request was consumed. The randomness was
+   lost and the fee kept by the queue). A callback that can fail is therefore
+   a **funds+liveness** bug, not just a liveness one. The callback must be
+   provably infallible.
+2. **Identity mode is chosen by the request, enforced at fulfillment.** The
+   current `ephemeral-rollups-sdk`/`ephemeral-vrf-sdk` macro issues SCOPED
+   requests (fulfillment signs with `PDA(["identity", consumer], VRF)`), the
+   deprecated pattern signs with the global `9irBy75…` identity. The consumer
+   callback must pin exactly the identity its request used.
+3. **The callback receives `sha256(vrf_output)`, not the raw VRF output**
+   (`provide_randomness.rs`: `let rdn = hash(&output.0)`). For roulette this
+   is irrelevant (any 32 unpredictable bytes work) but it means an external
+   verifier recomputing the VRF output must hash it before comparing.
+4. **CU budget**: the fulfillment runs at the oracle's own 300k CU budget with
+   ~54–57k consumed — proof verification inside `ProvideRandomness` is cheap
+   enough on devnet hardware. Roulette's callback would additionally run
+   `pick_winner` over participants (remaining accounts) — still far below the
+   budget.
+
+### 3.3 Compatibility findings (Anchor 0.30.1)
+
+| SDK line | ver | solana-program req | anchor-lang req | verdict on 0.30.1 |
+|---|---|---|---|---|
+| `ephemeral-vrf-sdk` 0.3.0–0.4.1 | 0.3.0+ | **hard ^3.0.0** (+ optional >=1.18.26,<3) | ^1.0 / <1.0.0 (opt) | ❌ unresolvable: `zeroize` conflict (curve25519-dalek 3.2.1 needs `<1.4`, k256 0.13 via solana-program 3.0 needs `^1.5`) |
+| `ephemeral-rollups-sdk` 0.17.x | 0.17.3 | **hard ^3.0.0** (+ optional >=1.16,<3) | ^1.0 / <1.0.0 (opt) | ❌ same zeroize conflict; `anchor-compat` does NOT help — the hard 3.0 requirement still enters the graph |
+| `ephemeral-vrf-sdk` 0.2.x | 0.2.0–0.2.3 | `>=1.18.26, <3` | `>=0.28.0` (opt) | ⚠️ resolves (with `solana-program` pinned to 1.18.26) but **every release is yanked** on crates.io, and the published 0.2.3 crate still fails to compile: its `anchor` feature mixes anchor 1.18-style `solana_program::pubkey::Pubkey` with anchor-lang's own `Pubkey` (16× E0308) |
+| git tag `v0.2.3` | — | 2.3.0 (workspace pin) | **1.2.0** (workspace pin) | ❌ compiles only with a SECOND anchor (1.2.0) in the graph |
+
+**Conclusion: there is NO published MagicBlock SDK line that compiles against
+anchor-lang 0.30.1 today.** The runtime itself (VRF program + queue + oracle)
+is live, fast and cheap on devnet, and the SDK's *instruction format* is
+stable enough to be built by hand — the spike's request was a 172-byte
+instruction with 5 accounts, reproducible without any SDK crate if needed.
+
+### 3.4 Architecture decision
+
+**OPTION B — NOT SAFE YET**, with a precise blocker and two viable paths:
+
+The randomness *source* is production-grade (RFC 9381 proof verified on-chain,
+2-slot latency, cheap, live oracle). The *integration path* for THIS codebase
+is blocked by the Anchor pin, not by the protocol:
+
+1. **Anchor upgrade path** (program-wide): anchor-lang 0.30.1 → ≥0.32.x plus
+   solana-program 2.x lifts the zeroize conflict and allows
+   `ephemeral-rollups-sdk 0.17.3` with `anchor-compat`. This is the same
+   class of change as the ORAO path (≥0.31) and must be treated as a
+   dedicated, audited migration of a deployed money-moving program — out of
+   scope for a spike by design.
+2. **No-SDK path** (no Anchor upgrade): build the `RequestRandomness`
+   instruction by hand (the spike proves the exact byte format works against
+   the live program) and keep anchor-lang 0.30.1. The callback's VRF-signer
+   pin must then be written by hand (`Signer` at address-pinned scoped PDA).
+   This keeps the roulette program's dependency graph untouched, at the cost
+   of owning ~100 lines of instruction/CPI code the SDK would normally
+   provide, and re-verifying it against upstream changes.
+
+Either way, BEFORE mainnet: the callback must be infallible (see §3.2 point 1
+— a failing callback consumes the request and forfeits the fee), the winner
+walk must move out of the callback (MAX_CALLBACK_ACCOUNTS = 25 caps the
+participants a callback can receive), and per-round economics must absorb the
+0.000525 SOL request cost explicitly.
+
+### 3.5 Former open questions — resolved by the spike
+
+1. ~~Is a funded oracle fulfilling devnet requests right now?~~ **YES** —
+   measured end-to-end (see §3.2): two requests, two on-chain fulfillments,
+   2–3 slots each, with the queue charging the requester and paying the
+   oracle.
+2. ~~Program size / compute budget impact?~~ **MEASURED** — spike ELF
+   221,208 B with the SDK vs 350,536 B for the full roulette program on the
+   same toolchain; fulfillment ≈54–57k CU total of which the callback's share
+   is ≈26k, far under the oracle's 300k budget.
+3. ~~`anchor` vs `anchor-compat`?~~ **Moot** — no published SDK line compiles
+   against anchor-lang 0.30.1 at all (§3.3); `anchor-compat` does not lift the
+   hard solana-program 3.0 requirement, and the 0.2.x line that would resolve
+   is yanked AND broken against 0.30.1 (two `Pubkey` types).
+4. ~~Callback CU / can-fail liveness?~~ **SHARPENED** — a failing callback is
+   worse than a liveness bug: the VRF program removes the request from the
+   queue before invoking the callback, so a revert consumes the request and
+   forfeits the fee with no retry and no refund path (§3.2 point 1).
 
 None of these can be answered without a real build and a real devnet request,
 which is a separate, explicitly-scoped task. Until then the honest position is:
