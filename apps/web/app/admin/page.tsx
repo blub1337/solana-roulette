@@ -192,6 +192,7 @@ function AdminLogin({ onAuthed }: { onAuthed: () => void }) {
         <div className="mb-1 flex items-center gap-2">
           <span className="inline-block h-2 w-2 rounded-full bg-gold-400" aria-hidden />
           <h1 className="font-display text-2xl text-gold-400">Admin console</h1>
+          <span className="text-xs uppercase tracking-widest text-ivory/40">SolRoll</span>
         </div>
         <p className="mb-5 text-sm text-ivory/60">
           Operator access. Enter the <code className="text-ivory/80">ADMIN_TOKEN</code> from your server
@@ -396,6 +397,7 @@ export default function AdminPage() {
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <h1 className="font-display text-3xl text-gold-400">Admin console</h1>
+            <span className="text-xs uppercase tracking-widest text-ivory/40">SolRoll</span>
             <Chip tone={overview?.system.devnetOnly ? "ok" : "bad"}>
               {overview?.system.network ?? "—"}
             </Chip>
