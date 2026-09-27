@@ -295,9 +295,19 @@ export class PostgresMirror {
           Client: new (opts: { connectionString: string }) => {
             connect: () => Promise<void>;
             query: (sql: string, params?: unknown[]) => Promise<unknown>;
+            on: (event: string, listener: (err: Error) => void) => void;
           };
         };
         const c = new pg.Client({ connectionString: url });
+        // A dropped connection emits an 'error' EVENT on the client. Without a
+        // handler Node treats it as an unhandled 'error' event and kills the
+        // whole API process (observed live when a remote DATABASE_URL dropped
+        // mid-session). The mirror is best-effort by design: log it, drop the
+        // client, and let the next use reconnect.
+        c.on("error", (err) => {
+          console.warn("[mirror] postgres connection lost (will reconnect on next use):", err.message);
+          this.client = null;
+        });
         await c.connect();
         // Self-provision the audit-mirror tables (idempotent). The mirror is
         // never authoritative and never blocks the API on failure.
