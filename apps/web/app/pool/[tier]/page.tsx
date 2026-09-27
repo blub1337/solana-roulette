@@ -10,6 +10,7 @@ import { PoolProgress } from "../../../components/PoolProgress";
 import { StatusPill, TierBadge } from "../../../components/StatusPill";
 import { ModeBanner } from "../../../components/ModeBanner";
 import { DevnetBadge } from "../../../components/DevnetBadge";
+import { BrandLogo, BRAND_NAME } from "../../../components/BrandLogo";
 import { useRoundState } from "../../../hooks/useRoundState";
 import { useDeposit } from "../../../hooks/useDeposit";
 import { useRuntime } from "../../../hooks/useRuntime";
@@ -100,6 +101,13 @@ export default function PoolRoom() {
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8">
+      <nav className="mb-6 flex flex-wrap items-center justify-between gap-4">
+        <Link href="/" aria-label="SolRoll home" className="shrink-0">
+          <BrandLogo className="h-9 w-auto sm:h-10" />
+        </Link>
+        <WalletMultiButton />
+      </nav>
+
       <header className="mb-6 flex flex-wrap items-center justify-between gap-4">
         <div>
           <Link href="/" className="text-sm text-ivory/50 hover:text-gold-300">
@@ -288,8 +296,8 @@ export default function PoolRoom() {
       {round && <VerifyPanel roundId={round.id} />}
 
       <footer className="mt-10 border-t border-felt-700 pt-6 text-center text-xs text-ivory/40">
-        DEVNET demonstration. No real-money wagering. The winner is determined by the runtime
-        and is independently verifiable — see docs/VERIFICATION.md.
+        {BRAND_NAME} · DEVNET demonstration. No real-money wagering. The winner is determined by
+        the runtime and is independently verifiable — see docs/VERIFICATION.md.
       </footer>
     </main>
   );
