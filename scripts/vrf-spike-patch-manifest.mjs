@@ -82,9 +82,11 @@ src = src
   // line, so no variant can leave a duplicate key behind (a duplicate
   // [features] key is a hard TOML error, not a warning).
   .replace(/^# VRF SDK line[^\n]*(?:\n(?!\s*$)[^\n]*)*\n/gm, "")
+  .replace(/^default = \[[^\]]*\]\n/m, "")
   .replace(/^sdk-vrf = \[[^\]]*\]\n/m, "")
   .replace(/^sdk-rollups = \[[^\]]*\]\n/m, "")
-  .replace(/^# Both SDK lines are OPTIONAL[\s\S]*?\n\n/m, "");
+  .replace(/^# Both SDK lines are OPTIONAL[\s\S]*?\n\n/m, "")
+  .replace(/^# NOTE: this manifest may contain[\s\S]*$/m, "");
 
 // 2. anchor-lang is pinned EXACTLY: the SDK's `anchor-lang-compat` range
 //    (>=0.28.0, <1.0.0) resolves to the NEWEST version in range, so the
@@ -106,19 +108,20 @@ if (pin !== "none") {
 const enabled = line === "vrf" ? "sdk-vrf" : "sdk-rollups";
 const featureBlock =
   line === "vrf"
-    ? `# VRF SDK line: ephemeral-vrf-sdk v0.2.3 (git tag).\n` +
+    ? `# VRF SDK line: ephemeral-vrf-sdk 0.2.3.\n` +
       `# The only published line whose dependency graph coexists with anchor-lang\n` +
       `# 0.30.1 — but EVERY release in it (0.1.0 .. 0.2.3) is YANKED from crates.io,\n` +
-      `# so it is consumed from git, which is not subject to registry yanking.\n` +
+      `# so it is consumed from its published tarball or its git tag, neither of\n` +
+      `# which is subject to registry yanking.\n` +
       `sdk-vrf = ["dep:ephemeral-vrf-sdk"]\n`
     : `# VRF SDK line: ephemeral-rollups-sdk 0.17.3.\n` +
       `# Current and NOT yanked, but it hard-requires solana-program 3.0.0, which\n` +
       `# cannot be resolved alongside anchor-lang 0.30.1.\n` +
       `sdk-rollups = ["dep:ephemeral-rollups-sdk"]\n`;
 
-src = src.replace(/^default = \[[^\]]*\]$/m, `default = ["${enabled}"]`);
-// Feature entry goes first in [features] (order is irrelevant to cargo).
-src = src.replace(/^default = \[[^\]]*\]$/m, (m) => `${featureBlock}${m}`);
+// Insert the feature block immediately after [features] — position-based, so
+// the result does not depend on what the previous run left behind.
+src = src.replace(/^\[features\]\n/m, `[features]\n${featureBlock}default = ["${enabled}"]\n`);
 // Dependency goes last in [dependencies].
 const sdkLine =
   line === "rollups" ? ROLLUPS_LINE : source === "vendor" ? VRF_LINE_VENDOR : VRF_LINE_GIT;
