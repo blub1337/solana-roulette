@@ -37,15 +37,15 @@
 //! would revert and the request would stay stuck in the queue.
 
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::hash::hash;
 use anchor_lang::solana_program::program::invoke_signed;
 
+// One source file, two SDK lines. `VrfProgram` sits in a different module
+// depending on the line: the 0.17.x meta crate re-exports the VRF SDK under
+// `vrf`, while the standalone 0.2.3 crate is the SDK itself.
 #[cfg(feature = "sdk-rollups")]
-use ephemeral_rollups_sdk::{anchor::VrfProgram, vrf as vrf_sdk};
+use ephemeral_rollups_sdk::vrf::{anchor::VrfProgram, self as vrf_sdk};
 #[cfg(not(feature = "sdk-rollups"))]
-use ephemeral_vrf_sdk as vrf_sdk;
-#[cfg(not(feature = "sdk-rollups"))]
-use ephemeral_vrf_sdk::anchor::VrfProgram;
+use ephemeral_vrf_sdk::{anchor::VrfProgram, self as vrf_sdk};
 
 // Replaced by the CI workflow with the id derived from the throwaway deploy
 // keypair. Kept as a valid base58 literal so the program always compiles.
@@ -122,13 +122,22 @@ pub mod vrf_spike {
 
         // caller_seed binds the VRF output to an input committed BEFORE the
         // draw. Roulette would put (round_id, lock_slot) in here.
+        //
+        // Built by hand rather than with `solana_program::hash`: that path
+        // does not exist in anchor-lang 0.32, and a 32-byte pre-image is all
+        // the VRF program needs — it hashes caller_seed into the request id
+        // itself.
+        let mut caller_seed = [0u8; 32];
+        caller_seed[0..8].copy_from_slice(&(client_seed as u64).to_le_bytes());
+        caller_seed[8..12].copy_from_slice(&state.request_count.to_le_bytes());
+        caller_seed[12..20].copy_from_slice(&ctx.accounts.payer.key().to_bytes()[..8]);
         let ix = vrf_sdk::instructions::create_request_randomness_ix(
             vrf_sdk::instructions::RequestRandomnessParams {
                 payer: ctx.accounts.payer.key(),
                 oracle_queue: ctx.accounts.oracle_queue.key(),
                 callback_program_id: ID,
                 callback_discriminator: instruction::ConsumeRandomness::DISCRIMINATOR.to_vec(),
-                caller_seed: hash(&[client_seed, state.request_count.to_le_bytes()]).to_bytes(),
+                caller_seed,
                 accounts_metas: Some(vec![vrf_sdk::types::SerializableAccountMeta {
                     pubkey: state.key(),
                     is_signer: false,
