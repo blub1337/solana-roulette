@@ -8,8 +8,9 @@
 
 body {
   background:
-    radial-gradient(1200px 600px at 50% -10%, rgba(18, 80, 47, 0.55), transparent 60%),
-    radial-gradient(800px 400px at 80% 110%, rgba(230, 185, 60, 0.08), transparent 60%),
+    radial-gradient(1200px 600px at 50% -10%, rgba(13, 78, 66, 0.6), transparent 60%),
+    radial-gradient(800px 400px at 80% 110%, rgba(230, 185, 60, 0.09), transparent 60%),
+    radial-gradient(600px 300px at 10% 30%, rgba(20, 184, 166, 0.07), transparent 65%),
     #04140c;
   min-height: 100vh;
 }
@@ -71,10 +72,37 @@ body {
 
 .hero-title {
   @apply font-display text-4xl leading-tight sm:text-5xl lg:text-6xl;
-  background: linear-gradient(120deg, #f5f1e6 0%, #f2cf62 55%, #c79a26 100%);
+  background: linear-gradient(120deg, #f7e08a 0%, #f2cf62 45%, #c79a26 100%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+}
+
+/* Brand: thin gold ring + soft teal halo behind the hero logo. */
+.brand-hero {
+  position: relative;
+  display: inline-block;
+  padding: 18px;
+  border-radius: 9999px;
+  border: 1px solid rgba(230, 185, 60, 0.28);
+  box-shadow:
+    0 0 40px rgba(20, 184, 166, 0.12),
+    inset 0 0 24px rgba(230, 185, 60, 0.06);
+}
+
+/* Solana wallet modal → match the dark/gold/teal SolRoll identity. */
+.wallet-adapter-modal-wrapper {
+  background-color: #072013;
+  border: 1px solid rgba(230, 185, 60, 0.25);
+}
+.wallet-adapter-modal-list-more {
+  color: rgba(245, 241, 230, 0.6) !important;
+}
+.wallet-adapter-modal-list-more:hover {
+  color: #f2cf62 !important;
+}
+.wallet-adapter-button {
+  font-weight: 600;
 }
 
 /* ------------------------------------------------------------------ */
@@ -146,4 +174,23 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .pool-fill, .animate-spin-slow, .winner-pop { animation: none; }
   .tier-card:hover { transform: none; }
+}
+
+/* Solana wallet-adapter buttons → dark premium SolRoll styling. */
+.wallet-adapter-button:not([data-variant="ghost"]):not([disabled]) {
+  background: linear-gradient(180deg, #f2cf62, #e6b93c);
+  color: #04140c;
+  border-radius: 0.75rem;
+  box-shadow: 0 0 24px rgba(230, 185, 60, 0.35);
+}
+.wallet-adapter-button:not([data-variant="ghost"]):not([disabled]):hover {
+  background: linear-gradient(180deg, #f7e08a, #f2cf62);
+}
+.wallet-adapter-button[disabled] {
+  background: rgba(255, 255, 255, 0.06);
+  color: rgba(245, 241, 230, 0.5);
+  border-radius: 0.75rem;
+}
+.wallet-adapter-modal-logo {
+  border-radius: 9999px;
 }
