@@ -39,6 +39,9 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::program::invoke_signed;
 
+#[cfg(feature = "sdk-rollups")]
+use ephemeral_rollups_sdk::anchor::vrf_callback;
+
 // One source file, two SDK lines. `VrfProgram` sits in a different module
 // depending on the line: the 0.17.x meta crate re-exports the VRF SDK under
 // `vrf`, while the standalone 0.2.3 crate is the SDK itself.
@@ -183,8 +186,7 @@ pub mod vrf_spike {
         state.roll = (ticket_u128(&randomness, 6) + 1) as u8;
         state.fulfilled = 1;
         msg!(
-            "VrfSpikeConsume signer={} fulfill={} lane={} roll={} randomness={}",
-            ctx.accounts.vrf_program_identity.key(),
+            "VrfSpikeConsume fulfill={} lane={} roll={} randomness={}",
             state.fulfill_count,
             state.last_lane,
             state.roll,
@@ -236,6 +238,23 @@ pub struct RequestCtx<'info> {
     pub vrf_program: Program<'info, VrfProgram>,
 }
 
+/// The callback context is SDK-line-specific because the VRF program signs the
+/// callback with a DIFFERENT identity depending on the request's identity mode:
+///   * rollups line (0.17.3): `#[vrf]`-issued requests are always SCOPED —
+///     fulfillment signs with PDA([b"identity", THIS_PROGRAM], VRF program).
+///     `#[vrf_callback]` injects and pins that signer (measured on devnet:
+///     the request went out with discriminator 10 = scoped).
+///   * vrf line (0.2.3): only the LEGACY global identity exists
+///     (`VRF_PROGRAM_IDENTITY`).
+#[cfg(feature = "sdk-rollups")]
+#[vrf_callback]
+#[derive(Accounts)]
+pub struct ConsumeCtx<'info> {
+    #[account(mut, seeds = [STATE_SEED], bump)]
+    pub state: Account<'info, SpikeState>,
+}
+
+#[cfg(not(feature = "sdk-rollups"))]
 #[derive(Accounts)]
 pub struct ConsumeCtx<'info> {
     /// Only the VRF program can sign for this address, and it only signs after
