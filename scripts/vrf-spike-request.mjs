@@ -1,16 +1,23 @@
 // Real devnet MagicBlock VRF request against the throwaway spike program.
 //
-// This performs NO simulation: it submits a real transaction, then waits for
-// the real oracle to submit the real fulfillment transaction, then reads the
-// randomness back out of the state account the callback wrote. Nothing here
-// fabricates a value; if the callback never lands, this exits non-zero.
+// NO SIMULATION: this submits a real transaction, then waits for the real
+// oracle to submit the real fulfillment transaction, then reads the randomness
+// back out of the state account the callback wrote. If the callback never
+// lands, this exits non-zero. No value is ever fabricated locally.
 //
-// Usage:
-//   node scripts/vrf-spike-request.mjs --program <ID> --keypair <path> [--lane scoped|legacy|both]
+//   node scripts/vrf-spike-request.mjs --program <ID> --keypair <path>
+//        [--lane regular|high_priority|both] [--timeout ms]
 //
-// Never prints key material. Only public keys, signatures and logs.
+// Never prints key material: only public keys, signatures, balances and logs.
 
-import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  Transaction,
+  TransactionInstruction,
+} from "@solana/web3.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 
@@ -28,29 +35,27 @@ function arg(name, fallback) {
 
 const PROGRAM_ID = new PublicKey(arg("program"));
 const KEYPAIR_PATH = arg("keypair", "operator-devnet.key.json");
-const LANE = arg("lane", "scoped");
+const LANE = arg("lane", "both");
 const TIMEOUT_MS = Number(arg("timeout", "240000"));
 
 const disc = (m) => createHash("sha256").update(`global:${m}`).digest().subarray(0, 8);
 
-const [stateScoped] = PublicKey.findProgramAddressSync([Buffer.from("state_s")], PROGRAM_ID);
-const [stateLegacy] = PublicKey.findProgramAddressSync([Buffer.from("state_l")], PROGRAM_ID);
-const [programIdentity] = PublicKey.findProgramAddressSync([Buffer.from("identity")], PROGRAM_ID);
-const [scopedIdentity] = PublicKey.findProgramAddressSync(
-  [Buffer.from("identity"), PROGRAM_ID.toBuffer()],
-  VRF_PROGRAM,
+const [state] = PublicKey.findProgramAddressSync([Buffer.from("state")], PROGRAM_ID);
+const [programIdentity] = PublicKey.findProgramAddressSync(
+  [Buffer.from("identity")],
+  PROGRAM_ID,
 );
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function rpc(fn, label, tries = 8) {
+async function rpc(fn, label, tries = 10) {
   for (let i = 0; i < tries; i++) {
     try {
       return await fn();
     } catch (e) {
       const msg = String(e?.message ?? e);
       if (i === tries - 1) throw new Error(`${label} failed after ${tries} tries: ${msg}`);
-      if (/429|Too Many|timeout|ECONN|fetch failed/i.test(msg)) {
+      if (/429|Too Many|timeout|ECONN|fetch failed|socket/i.test(msg)) {
         await sleep(1200 * (i + 1));
         continue;
       }
@@ -59,16 +64,17 @@ async function rpc(fn, label, tries = 8) {
   }
 }
 
+/** 8 disc + 4 req + 4 ful + 1 seed + 1 lane + 1 roll + 1 fulfilled + 32 rnd + 1 bump */
 function decodeState(buf) {
-  // 8 disc + 4 req + 4 ful + 1 seed + 1 roll + 1 fulfilled + 32 rnd + 1 bump
   return {
     request_count: buf.readUInt32LE(8),
     fulfill_count: buf.readUInt32LE(12),
     client_seed: buf.readUInt8(16),
-    roll: buf.readUInt8(17),
-    fulfilled: buf.readUInt8(18),
-    randomness: [...buf.subarray(19, 51)].map((b) => b.toString(16).padStart(2, "0")).join(""),
-    bump: buf.readUInt8(51),
+    last_lane: buf.readUInt8(17),
+    roll: buf.readUInt8(18),
+    fulfilled: buf.readUInt8(19),
+    randomness: buf.subarray(20, 52).toString("hex"),
+    bump: buf.readUInt8(52),
   };
 }
 
@@ -76,8 +82,7 @@ function initIx(payer) {
   return new TransactionInstruction({
     programId: PROGRAM_ID,
     keys: [
-      { pubkey: stateScoped, isSigner: false, isWritable: true },
-      { pubkey: stateLegacy, isSigner: false, isWritable: true },
+      { pubkey: state, isSigner: false, isWritable: true },
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
@@ -85,66 +90,59 @@ function initIx(payer) {
   });
 }
 
-function requestScopedIx(payer, seed) {
+function requestIx(payer, method, seed) {
   return new TransactionInstruction({
     programId: PROGRAM_ID,
-    // Order mirrors RequestScopedCtx: payer, oracle_queue, state, then the
-    // four fields `#[vrf]` appends: program_identity, vrf_program,
-    // slot_hashes, system_program.
+    // Order mirrors RequestCtx: payer, oracle_queue, state, then the four
+    // fields `#[vrf]` appends: program_identity, vrf_program, slot_hashes,
+    // system_program.
     keys: [
       { pubkey: payer, isSigner: true, isWritable: true },
       { pubkey: QUEUE, isSigner: false, isWritable: true },
-      { pubkey: stateScoped, isSigner: false, isWritable: true },
+      { pubkey: state, isSigner: false, isWritable: true },
       { pubkey: programIdentity, isSigner: false, isWritable: false },
       { pubkey: VRF_PROGRAM, isSigner: false, isWritable: false },
       { pubkey: SLOT_HASHES, isSigner: false, isWritable: false },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
-    data: Buffer.concat([disc("request_scoped"), Buffer.from([seed])]),
+    data: Buffer.concat([disc(method), Buffer.from([seed])]),
   });
 }
 
-function requestLegacyIx(payer, seed) {
-  return new TransactionInstruction({
-    programId: PROGRAM_ID,
-    keys: [
-      { pubkey: payer, isSigner: true, isWritable: true },
-      { pubkey: programIdentity, isSigner: false, isWritable: false },
-      { pubkey: QUEUE, isSigner: false, isWritable: true },
-      { pubkey: stateLegacy, isSigner: false, isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-      { pubkey: SLOT_HASHES, isSigner: false, isWritable: false },
-    ],
-    data: Buffer.concat([disc("request_legacy"), Buffer.from([seed])]),
-  });
-}
-
-async function send(c, payer, ix, label) {
-  const tx = new Transaction({ feePayer: payer.publicKey, blockhash: (await rpc(() => c.getLatestBlockhash("confirmed"), "blockhash")).blockhash, lastValidBlockHeight: 0 });
-  tx.add(ix);
-  const sig = await rpc(() => c.sendTransaction(tx, payer, { skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 5 }), label);
-  const meta = await rpc(() => rpcWait(c, sig), `${label} confirm`);
-  return { sig, meta };
-}
-
-async function rpcWait(c, sig) {
+async function confirm(c, sig) {
   for (let i = 0; i < 40; i++) {
     const s = await rpc(() => c.getSignatureStatus(sig, { searchTransactionHistory: true }), "status");
-    if (s?.value?.confirmationStatus === "confirmed" || s?.value?.err === null) {
-      const tx = await rpc(() => c.getTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }), "tx");
+    if (s?.value?.err) throw new Error(`tx ${sig} failed: ${JSON.stringify(s.value.err)}`);
+    if (s?.value?.confirmationStatus === "confirmed" || s?.value?.confirmationStatus === "finalized") {
+      const tx = await rpc(
+        () => c.getTransaction(sig, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }),
+        "tx",
+      );
       if (tx) return tx;
-    }
-    if (s?.value?.err) {
-      throw new Error(`tx ${sig} failed: ${JSON.stringify(s.value.err)}`);
     }
     await sleep(1500);
   }
   throw new Error(`tx ${sig} never confirmed`);
 }
 
-async function waitForCallback(c, statePda, afterSig, lane) {
+async function send(c, payer, ix, label) {
+  const bh = await rpc(() => c.getLatestBlockhash("confirmed"), "blockhash");
+  const tx = new Transaction({
+    feePayer: payer.publicKey,
+    blockhash: bh.blockhash,
+    lastValidBlockHeight: bh.lastValidBlockHeight,
+  });
+  tx.add(ix);
+  const sig = await rpc(
+    () => c.sendTransaction(tx, payer, { skipPreflight: false, preflightCommitment: "confirmed", maxRetries: 5 }),
+    label,
+  );
+  return { sig, tx: await confirm(c, sig) };
+}
+
+async function waitForCallback(c, statePda, afterSig) {
   const deadline = Date.now() + TIMEOUT_MS;
-  const seen = new Set();
+  const seen = new Set([afterSig]);
   while (Date.now() < deadline) {
     let sigs = [];
     try {
@@ -154,18 +152,19 @@ async function waitForCallback(c, statePda, afterSig, lane) {
       continue;
     }
     for (const s of sigs) {
-      if (s.signature === afterSig || seen.has(s.signature)) continue;
+      if (seen.has(s.signature) || s.err) continue;
       seen.add(s.signature);
-      if (s.err) continue;
       let tx;
       try {
-        tx = await rpc(() => c.getTransaction(s.signature, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }), "cb tx");
+        tx = await rpc(
+          () => c.getTransaction(s.signature, { maxSupportedTransactionVersion: 0, commitment: "confirmed" }),
+          "cb",
+        );
       } catch {
         continue;
       }
       if (!tx) continue;
-      const logs = tx.meta?.logMessages ?? [];
-      if (logs.some((l) => l.includes(`VrfSpikeConsume lane=${lane}`))) {
+      if ((tx.meta?.logMessages ?? []).some((l) => l.includes("VrfSpikeConsume"))) {
         return { sig: s.signature, tx };
       }
     }
@@ -174,123 +173,169 @@ async function waitForCallback(c, statePda, afterSig, lane) {
   return null;
 }
 
-function summarize(lane, seed, req, cb, payerBefore, payerAfter) {
-  const reqTx = req.meta;
-  const cbTx = cb?.tx;
-  const logs = cbTx?.meta?.logMessages ?? [];
-  const consumeLog = logs.find((l) => l.includes("VrfSpikeConsume")) ?? null;
-  const reqLogs = reqTx?.meta?.logMessages ?? [];
-  const reqLog = reqLogs.find((l) => l.includes("VrfSpikeRequest")) ?? null;
-  const perProgram = [];
-  for (const l of cbTx?.meta?.logMessages ?? []) {
-    const m = l.match(/^Program (\S+) consumed (\d+) of (\d+) compute units/);
-    if (m) perProgram.push({ program: m[1], cu: Number(m[2]), budget: Number(m[3]) });
+/** Which account signed the callback CPI? Must be the VRF_PROGRAM_IDENTITY. */
+function identityCheck(cbTx) {
+  const keys = cbTx.transaction.message.accountKeys.map((k) =>
+    typeof k === "string" ? k : typeof k.toBase58 === "function" ? k.toBase58() : k.pubkey.toBase58(),
+  );
+  for (const inner of cbTx.meta.innerInstructions ?? []) {
+    for (const i of inner.instructions) {
+      const pid =
+        typeof i.programId?.toBase58 === "function" ? i.programId.toBase58() : keys[i.programIdIndex];
+      if (pid !== PROGRAM_ID.toBase58()) continue;
+      const a0 = i.accounts?.[0];
+      const addr = typeof a0 === "number" ? keys[a0] : (a0?.pubkey?.toBase58?.() ?? "?");
+      const isSigner = typeof a0 === "number" ? null : a0.isSigner;
+      return {
+        callback_account0: addr,
+        is_signer: isSigner,
+        expected: GLOBAL_IDENTITY.toBase58(),
+        matches_expected: addr === GLOBAL_IDENTITY.toBase58() && isSigner === true,
+      };
+    }
   }
+  return { callback_account0: null, note: "callback CPI not found in inner instructions" };
+}
+
+function perProgramCu(tx) {
+  const out = [];
+  for (const l of tx.meta.logMessages ?? []) {
+    const m = l.match(/^Program (\S+) consumed (\d+) of (\d+) compute units/);
+    if (m) out.push({ program: m[1], cu: Number(m[2]), budget: Number(m[3]) });
+  }
+  return out;
+}
+
+function cuBreakdown(tx) {
+  // The last "consumed X of Y" line for a program is that program's total,
+  // inclusive of its CPIs. Proof-verification cost = VRF program total minus
+  // what the callback reported it consumed.
+  const entries = perProgramCu(tx);
+  const ours = entries.filter((e) => e.program === PROGRAM_ID.toBase58()).pop();
+  const vrf = entries.filter((e) => e.program === VRF_PROGRAM.toBase58()).pop();
   return {
-    lane,
-    client_seed: seed,
-    program_id: PROGRAM_ID.toBase58(),
-    payer: payerBefore.pubkey.toBase58(),
-    request_tx: req.sig,
-    request_slot: reqTx?.slot ?? null,
-    request_cu: reqTx?.meta?.computeUnitsConsumed ?? null,
-    request_fee_lamports: reqTx?.meta?.fee ?? null,
-    request_log: reqLog,
-    fulfillment_tx: cb?.sig ?? null,
-    fulfillment_slot: cbTx?.slot ?? null,
-    fulfillment_cu_total: cbTx?.meta?.computeUnitsConsumed ?? null,
-    fulfillment_fee_lamports: cbTx?.meta?.fee ?? null,
-    fulfillment_latency_slots:
-      cbTx && reqTx ? cbTx.slot - reqTx.slot : null,
-    per_program_cu: perProgram,
-    callback_log: consumeLog,
-    queue_lamports_after: null,
-    request_cost_lamports: payerBefore.lamports - payerAfter,
-    request_cost_sol: (payerBefore.lamports - payerAfter) / LAMPORTS_PER_SOL,
+    entries,
+    callback_cu: ours?.cu ?? null,
+    callback_budget: ours?.budget ?? null,
+    vrf_program_total_cu: vrf?.cu ?? null,
+    implied_proof_verification_cu:
+      vrf && ours ? vrf.cu - ours.cu : null,
   };
 }
 
 async function main() {
   const c = new Connection(RPC, "confirmed");
-  const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(fs.readFileSync(KEYPAIR_PATH, "utf8"))));
+  const payer = Keypair.fromSecretKey(
+    Uint8Array.from(JSON.parse(fs.readFileSync(KEYPAIR_PATH, "utf8"))),
+  );
 
   console.log(`program:      ${PROGRAM_ID.toBase58()}`);
   console.log(`payer:        ${payer.publicKey.toBase58()}`);
   console.log(`queue:        ${QUEUE.toBase58()}`);
   console.log(`vrf program:  ${VRF_PROGRAM.toBase58()}`);
-  console.log(`scoped idty:  ${scopedIdentity.toBase58()}`);
+  console.log(`state:        ${state.toBase58()}`);
+  console.log(`identity pda: ${programIdentity.toBase58()}`);
   console.log(`global idty:  ${GLOBAL_IDENTITY.toBase58()}`);
 
-  const lanes = LANE === "both" ? ["scoped", "legacy"] : [LANE];
+  const lanes =
+    LANE === "both" ? ["regular", "high_priority"] : [LANE];
   const results = [];
 
-  // One init for both lanes, only if needed.
-  const existing = await rpc(() => c.getAccountInfo(stateScoped, { commitment: "confirmed" }), "state");
+  const existing = await rpc(() => c.getAccountInfo(state, { commitment: "confirmed" }), "state");
   if (!existing) {
-    const { sig, meta } = await send(c, payer, initIx(payer.publicKey), "init");
-    if (meta?.meta?.err) throw new Error(`init failed: ${JSON.stringify(meta.meta.err)}`);
+    const { sig, tx } = await send(c, payer, initIx(payer.publicKey), "init");
     console.log(`init tx: ${sig}`);
+    if (tx.meta.err) throw new Error(`init failed: ${JSON.stringify(tx.meta.err)}`);
   } else {
     console.log("init: already present");
   }
 
+  const queueBefore = (await rpc(() => c.getAccountInfo(QUEUE, { commitment: "confirmed" }), "q")).lamports;
   let seed = 41;
+
   for (const lane of lanes) {
-    const statePda = lane === "scoped" ? stateScoped : stateLegacy;
-    const before = { pubkey: payer.publicKey, lamports: await rpc(() => c.getBalance(payer.publicKey), "bal") };
+    const method = `request_${lane}`;
+    const before = await rpc(() => c.getBalance(payer.publicKey), "bal");
+    const queueAtRequest = (await rpc(() => c.getAccountInfo(QUEUE, { commitment: "confirmed" }), "q")).lamports;
 
-    console.log(`\n--- lane=${lane}: sending REAL RequestRandomness ---`);
+    console.log(`\n--- lane=${lane}: sending a REAL RequestRandomness ---`);
     const t0 = Date.now();
-    const ix = lane === "scoped" ? requestScopedIx(payer.publicKey, seed) : requestLegacyIx(payer.publicKey, seed);
-    const req = await send(c, payer, ix, `request_${lane}`);
-    console.log(`request tx:   ${req.sig}  (slot ${req.meta?.slot}, cu ${req.meta?.meta?.computeUnitsConsumed})`);
-    for (const l of req.meta?.meta?.logMessages ?? []) console.log(`  | ${l}`);
-    if (req.meta?.meta?.err) throw new Error(`request failed: ${JSON.stringify(req.meta.meta.err)}`);
+    const req = await send(c, payer, requestIx(payer.publicKey, method, seed), method);
+    console.log(`request tx:  ${req.sig}`);
+    console.log(`             slot ${req.tx.slot}, cu ${req.tx.meta.computeUnitsConsumed}, fee ${req.tx.meta.fee} lamports`);
+    for (const l of req.tx.meta.logMessages) console.log(`  | ${l}`);
+    if (req.tx.meta.err) throw new Error(`request failed: ${JSON.stringify(req.tx.meta.err)}`);
 
-    const after = await rpc(() => c.getBalance(payer.publicKey), "bal");
-    console.log(`waiting for the real fulfillment (timeout ${TIMEOUT_MS}ms)...`);
-    const cb = await waitForCallback(c, statePda, req.sig, lane);
+    const afterRequest = await rpc(() => c.getBalance(payer.publicKey), "bal");
+    const queueAfterRequest = (await rpc(() => c.getAccountInfo(QUEUE, { commitment: "confirmed" }), "q")).lamports;
+    console.log(
+      `request cost: ${before.lamports - afterRequest.lamports} lamports ` +
+        `(${(before.lamports - afterRequest.lamports) / LAMPORTS_PER_SOL} SOL); ` +
+        `queue delta ${queueAfterRequest - queueAtRequest} lamports`,
+    );
+
+    console.log(`waiting for the REAL fulfillment (timeout ${TIMEOUT_MS}ms)...`);
+    const cb = await waitForCallback(c, state, req.sig);
 
     if (!cb) {
-      console.error(`LANE ${lane}: NO FULFILLMENT within ${TIMEOUT_MS}ms — the request was NOT fulfilled.`);
-      results.push({ lane, request_tx: req.sig, fulfilled: false });
+      console.error(`lane ${lane}: NOT FULFILLED within ${TIMEOUT_MS}ms`);
+      results.push({
+        lane,
+        fulfilled: false,
+        request_tx: req.sig,
+        request_cost_sol: (before.lamports - afterRequest.lamports) / LAMPORTS_PER_SOL,
+      });
+      seed += 1;
       continue;
     }
 
+    const cu = cuBreakdown(cb.tx);
+    const wall = (Date.now() - t0) / 1000;
     console.log(`\n--- lane=${lane}: REAL FULFILLMENT ---`);
-    console.log(`fulfillment:  ${cb.sig}  (slot ${cb.tx.slot}, total cu ${cb.tx.meta.computeUnitsConsumed}, fee ${cb.tx.meta.fee} lamports)`);
-    console.log(`latency:      ${((Date.now() - t0) / 1000).toFixed(1)}s wall / ${cb.tx.slot - req.meta.slot} slots`);
+    console.log(`fulfillment: ${cb.sig}`);
+    console.log(`             slot ${cb.tx.slot}, total cu ${cb.tx.meta.computeUnitsConsumed}, fee ${cb.tx.meta.fee} lamports`);
+    console.log(`             ${wall.toFixed(1)}s wall / ${cb.tx.slot - req.tx.slot} slots after the request`);
+    console.log(`             callback cu ${cu.callback_cu} (budget ${cu.callback_budget}), proof verification ~${cu.implied_proof_verification_cu} cu`);
     for (const l of cb.tx.meta.logMessages) console.log(`  | ${l}`);
 
-    const acc = await rpc(() => c.getAccountInfo(statePda, { commitment: "confirmed" }), "state after");
+    const queueAtFulfill = (await rpc(() => c.getAccountInfo(QUEUE, { commitment: "confirmed" }), "q")).lamports;
+    const acc = await rpc(() => c.getAccountInfo(state, { commitment: "confirmed" }), "state2");
     const st = decodeState(acc.data);
     console.log(`state on-chain: ${JSON.stringify(st)}`);
 
-    // Did the VRF program really sign as the right identity?
-    let signerCheck = "not-inspected";
-    for (const inner of cb.tx.meta.innerInstructions ?? []) {
-      for (const i of inner.instructions) {
-        const keys = cb.tx.transaction.message.accountKeys.map((k) =>
-          typeof k === "string" ? k : typeof k.toBase58 === "function" ? k.toBase58() : k.pubkey.toBase58(),
-        );
-        const pid = typeof i.programId?.toBase58 === "function" ? i.programId.toBase58() : keys[i.programIdIndex];
-        if (pid === PROGRAM_ID.toBase58() && (i.accounts?.length ?? 0) > 0) {
-          const a0 = i.accounts[0];
-          const addr = typeof a0 === "number" ? keys[a0] : a0?.pubkey?.toBase58?.() ?? "?";
-          const isSigner = typeof a0 === "number" ? null : a0.isSigner;
-          signerCheck = `callback account[0]=${addr} isSigner=${isSigner} expected=${lane === "scoped" ? scopedIdentity.toBase58() : GLOBAL_IDENTITY.toBase58()}`;
-        }
-      }
-    }
-    console.log(`identity check: ${signerCheck}`);
+    const idc = identityCheck(cb.tx);
+    console.log(`identity check: ${JSON.stringify(idc)}`);
 
-    const qAcc = await rpc(() => c.getAccountInfo(QUEUE, { commitment: "confirmed" }), "queue");
-    const s = summarize(lane, seed, req, cb, before, after);
-    s.queue_lamports_after = qAcc.lamports;
-    s.state_after = st;
-    s.identity_check = signerCheck;
-    s.fulfilled = true;
-    results.push(s);
+    results.push({
+      lane,
+      fulfilled: true,
+      program_id: PROGRAM_ID.toBase58(),
+      payer: payer.publicKey.toBase58(),
+      client_seed: seed,
+      request_tx: req.sig,
+      request_slot: req.tx.slot,
+      request_cu: req.tx.meta.computeUnitsConsumed,
+      request_fee_lamports: req.tx.meta.fee,
+      request_cost_lamports: before.lamports - afterRequest.lamports,
+      request_cost_sol: (before.lamports - afterRequest.lamports) / LAMPORTS_PER_SOL,
+      queue_deposit_lamports: queueAfterRequest - queueAtRequest,
+      queue_release_lamports: queueAfterRequest - queueAtFulfill,
+      queue_balance_delta_over_lane: queueAtFulfill - queueAtRequest,
+      queue_balance_at_start: queueBefore,
+      queue_balance_at_end: queueAtFulfill,
+      fulfillment_tx: cb.sig,
+      fulfillment_slot: cb.tx.slot,
+      latency_slots: cb.tx.slot - req.tx.slot,
+      latency_wall_seconds: wall,
+      fulfillment_cu_total: cb.tx.meta.computeUnitsConsumed,
+      fulfillment_fee_lamports: cb.tx.meta.fee,
+      callback_cu: cu.callback_cu,
+      callback_cu_budget: cu.callback_budget,
+      implied_proof_verification_cu: cu.implied_proof_verification_cu,
+      per_program_cu: cu.entries,
+      state_after: st,
+      identity_check: idc,
+    });
     seed += 1;
   }
 
@@ -298,9 +343,7 @@ async function main() {
   console.log(JSON.stringify({ program_id: PROGRAM_ID.toBase58(), results }, null, 2));
   console.log("###END###");
 
-  if (!results.every((r) => r.fulfilled)) {
-    process.exit(2);
-  }
+  if (!results.every((r) => r.fulfilled)) process.exit(2);
 }
 
 main().catch((e) => {
