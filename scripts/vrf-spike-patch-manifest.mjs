@@ -3,14 +3,26 @@
 // order-independent: it strips both SDK lines and re-inserts the selected one.
 //
 //   node scripts/vrf-spike-patch-manifest.mjs --line vrf     --anchor 0.30.1
-//   node scripts/vrf-spike-patch-manifest.mjs --line vrf     --anchor 0.30.1 --pin-solana 1.18.26
+//   node scripts/vrf-spike-patch-manifest.mjs --line vrf     --anchor 0.30.1 --sdk-source vendor
 //   node scripts/vrf-spike-patch-manifest.mjs --line rollups --anchor 0.32.2
 //
-// --line vrf     : ephemeral-vrf-sdk (git tag v0.2.3 — the yanked crates.io
-//                  release, consumed from git, whose dependency graph is the
-//                  only one that coexists with anchor-lang 0.30.1)
+// --line vrf     : ephemeral-vrf-sdk 0.2.3 (the yanked release whose declared
+//                  requirements — anchor-lang >=0.28.0, solana-program
+//                  ">=1.18.26,<3" — are the only ones compatible with
+//                  anchor-lang 0.30.1)
 // --line rollups : ephemeral-rollups-sdk 0.17.3 (current, not yanked, but hard-
 //                  requires solana-program 3.0.0)
+//
+// --sdk-source selects HOW the 0.2.3 line is obtained:
+//   git    : `git = ".../ephemeral-vrf", tag = "v0.2.3"`. NOT equivalent to the
+//            published crate: that tag's workspace already pins anchor-lang
+//            1.2.0 / solana-program 2.3.0, so it drags a second Anchor into the
+//            graph. Kept as a measured data point.
+//   vendor : the actual published .crate tarball unpacked to a local path,
+//            with its yanked proc-macro dependency patched to a local path too.
+//            This is the only way to compile the real 0.2.3 code today, because
+//            cargo refuses to SELECT a yanked version but happily builds one
+//            that is already present as a path dependency.
 //
 // WHY THE OTHER LINE IS DELETED RATHER THAN JUST DISABLED:
 // cargo-build-sbf shells out to `cargo metadata`, which resolves every
@@ -29,6 +41,8 @@ function arg(name, fallback) {
 
 const line = arg("line", "vrf");
 const anchor = arg("anchor", "0.30.1");
+const source = process.argv.includes("--vendor") ? "vendor" : arg("sdk-source", arg("source", "git")); // git | vendor
+const VENDOR_DIR = arg("vendor-dir", "/tmp/vendor");
 // The 0.2.x SDK declares `solana-program = ">=1.18.26, <3"`, so cargo picks
 // the NEWEST version in range (2.x). Its code is written against the 1.18
 // API, and the `anchor` feature re-exports anchor's Pubkey, so 1.18 + 2.x in
@@ -42,10 +56,18 @@ if (line !== "vrf" && line !== "rollups") {
   process.exit(1);
 }
 
-const VRF_LINE =
+const VRF_LINE_GIT =
   'ephemeral-vrf-sdk = { git = "https://github.com/magicblock-labs/ephemeral-vrf", tag = "v0.2.3", features = ["anchor"], optional = true }';
+const VRF_LINE_VENDOR =
+  `ephemeral-vrf-sdk = { path = "${VENDOR_DIR}/ephemeral-vrf-sdk-0.2.3", features = ["anchor"], optional = true }`;
 const ROLLUPS_LINE =
   'ephemeral-rollups-sdk = { version = "=0.17.3", features = ["vrf", "anchor-compat"], optional = true }';
+
+// The vendored SDK depends on a proc-macro crate that is yanked too, so it is
+// patched to a local path as well.
+const PATCH_BLOCK =
+  `\n[patch.crates-io]\n` +
+  `ephemeral-vrf-sdk-vrf-macro = { path = "${VENDOR_DIR}/ephemeral-vrf-sdk-vrf-macro-0.2.3" }\n`;
 
 let src = fs.readFileSync(MANIFEST, "utf8");
 
@@ -54,6 +76,7 @@ let src = fs.readFileSync(MANIFEST, "utf8");
 src = src
   .replace(/^ephemeral-vrf-sdk = .*\n/m, "")
   .replace(/^ephemeral-rollups-sdk = .*\n/m, "")
+  .replace(/^\[patch\.crates-io\][\s\S]*$/m, "")
   // Remove the SDK feature entries and their comment runs. A comment run is
   // every consecutive non-blank line from `# VRF SDK line` up to the blank
   // line, so no variant can leave a duplicate key behind (a duplicate
@@ -97,10 +120,12 @@ src = src.replace(/^default = \[[^\]]*\]$/m, `default = ["${enabled}"]`);
 // Feature entry goes first in [features] (order is irrelevant to cargo).
 src = src.replace(/^default = \[[^\]]*\]$/m, (m) => `${featureBlock}${m}`);
 // Dependency goes last in [dependencies].
-src = src.replace(
-  /^(anchor-lang = \{[^\n]*\}\n)/m,
-  `$1${line === "vrf" ? VRF_LINE : ROLLUPS_LINE}\n`,
-);
+const sdkLine =
+  line === "rollups" ? ROLLUPS_LINE : source === "vendor" ? VRF_LINE_VENDOR : VRF_LINE_GIT;
+src = src.replace(/^(anchor-lang = \{[^\n]*\}\n)/m, `$1${sdkLine}\n`);
+if (line === "vrf" && source === "vendor") {
+  src = src.replace(/\n*$/, "\n") + PATCH_BLOCK;
+}
 
 fs.writeFileSync(MANIFEST, src);
 
@@ -108,5 +133,5 @@ const report = src
   .split("\n")
   .filter((l) => /^(default|sdk-vrf|sdk-rollups|anchor-lang|ephemeral-\S+-sdk|solana-program)\s*=/.test(l))
   .join("\n");
-console.log(`patched ${MANIFEST}: line=${line} anchor=${anchor} pin-solana=${pin}`);
+console.log(`patched ${MANIFEST}: line=${line} source=${source} anchor=${anchor} pin-solana=${pin}`);
 console.log(report);
