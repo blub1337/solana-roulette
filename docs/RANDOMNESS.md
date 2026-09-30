@@ -207,7 +207,7 @@ OPEN → FULL → LOCKED → RANDOMNESS_REQUESTED   (lock_round: request_vrf CPI
   request; a `vrf_program_identity` (`Signer`, address-pinned) on the callback;
   the `Round` PDA passed as a writable remaining account.
 - **Who pays:** the lock-time payer, per request, in SOL. Currently a fixed
-  cost the platform absorbs; a per-round fee would change the 7.5% economics
+  cost the platform absorbs; a per-round fee would change the 2% economics
   and is out of scope.
 - **Callback/fulfillment:** the VRF program verifies the proof and CPIs the
   callback. The callback must be written so it can never fail (a failing

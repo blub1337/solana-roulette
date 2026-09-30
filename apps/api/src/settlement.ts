@@ -7,7 +7,7 @@
  *   RANDOMNESS_PENDING, winner not frozen, slot ≥ reveal_slot
  *                   → settle_round      (phase 1: freeze randomness/winner/amounts)
  *   RANDOMNESS_PENDING, winner frozen
- *                   → pay_winners       (phase 2: 92.5% + 7.5%, → COMPLETED)
+ *                   → pay_winners       (phase 2: 98% + 2%, → COMPLETED)
  *   COMPLETED       → create next round in this lane
  *
  * One tick per pool lane (0=1 SOL, 1=10 SOL, 2=100 SOL) so a settling 1-SOL
@@ -41,22 +41,54 @@ export interface SettlementDriverDeps {
 
 let started = false;
 
+/**
+ * Re-entrancy guard around one settlement pass.
+ *
+ * The driver is an unattended interval, and a pass is not instantaneous: it
+ * reads three lanes from the RPC, waits for a reveal slot, and in the real-funds
+ * path broadcasts and confirms a payout. If a pass outlives the poll interval
+ * the next one starts while the first is still running, and two passes racing
+ * over the same lane can each open a "next round" (two OPEN rounds in one lane,
+ * the older one and its pot orphaned) or each start the same payout. The guard
+ * makes a pass strictly serial: an overlapping tick is dropped, not queued —
+ * the next interval re-reads the chain and continues from there.
+ *
+ * Returns whether the pass actually ran.
+ */
+export function createGuardedTick(
+  deps: SettlementDriverDeps,
+  pass: (d: SettlementDriverDeps) => Promise<void> = runOnce
+): () => Promise<boolean> {
+  let inFlight = false;
+  return async function tick(): Promise<boolean> {
+    if (inFlight) return false;
+    inFlight = true;
+    try {
+      await pass(deps);
+      return true;
+    } finally {
+      inFlight = false;
+    }
+  };
+}
+
 export function startSettlementDriver(deps: SettlementDriverDeps): void {
   if (started) return;
   started = true;
 
   const intervalMs = Number(process.env.SETTLEMENT_POLL_MS ?? 5_000);
+  const tick = createGuardedTick(deps);
 
-  const tick = async () => {
+  const safeTick = async () => {
     try {
-      await runOnce(deps);
+      await tick();
     } catch (e) {
       console.warn("[settlement]", e instanceof Error ? e.message : e);
     }
   };
 
-  setInterval(tick, intervalMs).unref();
-  void tick();
+  setInterval(safeTick, intervalMs).unref();
+  void safeTick();
 }
 
 export async function runOnce(deps: SettlementDriverDeps): Promise<void> {
@@ -240,12 +272,11 @@ async function completePaidRound(
       payoutTx: paid.signature,
       explorer: `https://explorer.solana.com/tx/${paid.signature}?cluster=devnet`,
     },
-  });
-  store.upsertRound({
-    id: roundId.toString(),
-    tier,
-    status: "COMPLETED",
-    feeBps: deps.cfg.feeBps,
+  });  store.upsertRound({
+          id: roundId.toString(),
+          tier,
+          status: "COMPLETED",
+          feeBps: deps.cfg.feeBps,
     winner: paid.winner,
     payoutTxSignature: paid.signature,
     settlementVerified: true,
@@ -277,14 +308,12 @@ async function openNextRound(tier: number, deps: SettlementDriverDeps, previousI
 }
 
 /**
- * POOL_TARGET_SOL in lamports (integer bigint math; falls back to max round
- * size). Legacy single-pool knob — the tier caps are the authoritative limits.
+ * POOL_TARGET_SOL in lamports (already exact bigint from config; falls back to
+ * max round size). Legacy single-pool knob — the tier caps are the
+ * authoritative limits.
  */
 export function poolTargetLamports(cfg: AppConfig): bigint {
-  if (cfg.poolTargetSol !== null) {
-    return BigInt(Math.round(cfg.poolTargetSol * 1_000_000_000));
-  }
-  return cfg.maxRoundSizeLamports;
+  return cfg.poolTargetLamports ?? cfg.maxRoundSizeLamports;
 }
 
 /** Pool-volume cap of a tier in lamports (integer bigint math, no floats). */

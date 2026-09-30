@@ -4,10 +4,13 @@ import Link from "next/link";
 import { useCallback } from "react";
 import { usePools } from "../hooks/usePools";
 import { useRuntime } from "../hooks/useRuntime";
+import { useFeeTerms } from "../hooks/useFeeTerms";
+import { FEE_EXAMPLE_POT_SOL } from "../lib/fees";
 import { useSse } from "../hooks/useSse";
 import { ModeBanner } from "../components/ModeBanner";
 import { DevnetBadge } from "../components/DevnetBadge";
-import { BrandLogo, BRAND_NAME } from "../components/BrandLogo";
+import { BrandLogo, BrandMark, BRAND_NAME } from "../components/BrandLogo";
+import { WalletMultiButton } from "./providers";
 import { TIER_META, TIER_COUNT, type Tier } from "@solana-roulette/types";
 
 function lamportsToSol(lamports: string | null | undefined): string {
@@ -23,6 +26,10 @@ function shorten(pk: string | null | undefined): string {
 export default function Home() {
   const { pools, error, refresh } = usePools();
   const { runtime } = useRuntime();
+  // Never a hardcoded percentage: the API reports the fee the runtime enforces.
+  const fee = useFeeTerms();
+  const feePercent = fee ? `${fee.feePercent}%` : "—";
+  const winnerPercent = fee ? `${fee.winnerPercent}%` : "—";
 
   // Live updates: any settlement event re-reads the pools from the API.
   const onEvent = useCallback(() => void refresh(), [refresh]);
@@ -30,6 +37,17 @@ export default function Home() {
 
   return (
     <main className="mx-auto max-w-6xl px-4 py-8">
+      {/* Sticky top nav: brand mark + wallet connect (matches the pool rooms) */}
+      <nav className="sticky top-0 z-40 -mx-4 mb-6 flex items-center justify-between gap-4 border-b border-felt-700/70 bg-felt-950/80 px-4 py-3 backdrop-blur">
+        <Link href="/" aria-label="SolRoll home" className="shrink-0">
+          <BrandMark
+            className="h-8 w-auto sm:h-9"
+            fallbackClassName="text-lg sm:text-xl"
+          />
+        </Link>
+        <WalletMultiButton />
+      </nav>
+
       {/* Hero */}
       <header className="mb-8 text-center">
         <div className="mb-4 flex flex-wrap items-center justify-center gap-3">
@@ -40,14 +58,16 @@ export default function Home() {
             provably fair
           </span>
           <span className="rounded-full border border-felt-600 bg-felt-900 px-3 py-1 text-xs uppercase tracking-widest text-ivory/60">
-            7.5% platform fee
+            {feePercent} platform fee
           </span>
         </div>
-        <BrandLogo
-          className="h-20 w-auto sm:h-24 lg:h-28"
-          fallbackClassName="hero-title text-5xl sm:text-6xl lg:text-7xl py-2"
-        />
-        <h1 className="hero-title mt-4">SOLROLL</h1>
+        <div className="hero-halo flex justify-center">
+          <BrandLogo
+            className="h-36 w-auto sm:h-48 lg:h-56"
+            fallbackClassName="hero-title text-5xl sm:text-6xl lg:text-7xl py-2"
+          />
+        </div>
+        <h1 className="sr-only">SolRoll</h1>
         <p className="mx-auto mt-4 max-w-2xl text-ivory/70">
           Three independent pools. Every stake is weighted by its size, the pot closes
           automatically at its limit, and the winner is determined deterministically —
@@ -172,16 +192,17 @@ export default function Home() {
         <div>
           <h2 className="font-display text-lg text-gold-300">How every pot is split</h2>
           <p className="mt-1 text-sm text-ivory/60">
-            Integer lamport math, applied by the runtime — 10 SOL → 0.75 SOL fee + 9.25 SOL
+            Integer lamport math, applied by the runtime — {FEE_EXAMPLE_POT_SOL} SOL →{" "}
+            {fee ? fee.example.feeSol : "—"} SOL fee + {fee ? fee.example.payoutSol : "—"} SOL
             payout. The fee wallet only ever receives the commission.
           </p>
         </div>
         <div className="flex items-center gap-4 font-mono text-sm">
-          <span className="text-gold-300">92.5% winner</span>
+          <span className="text-gold-300">{winnerPercent} winner</span>
           <span aria-hidden className="text-ivory/30">
             |
           </span>
-          <span className="text-ivory/70">7.5% fee</span>
+          <span className="text-ivory/70">{feePercent} fee</span>
         </div>
       </section>
 
@@ -198,7 +219,7 @@ export default function Home() {
           },
           {
             t: "3 — Atomic payout",
-            d: "92.5% goes to the winner and 7.5% to the fee wallet in one atomic step, then the next round opens automatically. No admin, no manual payout.",
+            d: `${winnerPercent} goes to the winner and ${feePercent} to the fee wallet in one atomic step, then the next round opens automatically. No admin, no manual payout.`,
           },
         ].map((s) => (
           <div key={s.t} className="panel p-6">

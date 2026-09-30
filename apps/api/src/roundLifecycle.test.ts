@@ -18,7 +18,7 @@
  * The money rules this pins:
  *   - a round is credited ONLY from a CONFIRMED on-chain transfer
  *   - a round is COMPLETED only AFTER its payout is CONFIRMED on chain
- *   - the winner receives 92.5% and the platform fee wallet exactly 7.5%
+ *   - the winner receives 98% and the platform fee wallet exactly 2%
  *   - the escrow pays out the pot and nothing else, exactly once
  *   - the database mirror agrees with the chain at every step
  *
@@ -61,16 +61,16 @@ const sendMock = vi.mocked(sendAndConfirmTransaction);
 // ---------------------------------------------------------------------------
 
 const SOL = 1_000_000_000n;
-const FEE_BPS = 750; // 7.5%
+const FEE_BPS = 200; // 2%
 const TIER_CAP = SOL; // lane 0 is the 1 SOL pool
-const FEE_ON_TIER_CAP = (TIER_CAP * BigInt(FEE_BPS)) / 10_000n; // 75_000_000
-const PAYOUT_ON_TIER_CAP = TIER_CAP - FEE_ON_TIER_CAP; // 925_000_000
+const FEE_ON_TIER_CAP = (TIER_CAP * BigInt(FEE_BPS)) / 10_000n; // 20_000_000
+const PAYOUT_ON_TIER_CAP = TIER_CAP - FEE_ON_TIER_CAP; // 980_000_000
 const TX_FEE = 5_000n; // what a real cluster charges the fee payer
 
 const PROGRAM_ID = new PublicKey("AAHBk1qbXCzsbiLe7TiXuZNTvNPVtovtC6NWk9tsi6EZ");
 /** The deposit escrow AND the server-side payout signer (custody). */
 const OPERATOR = Keypair.fromSeed(new Uint8Array(32).fill(41));
-/** Receives the 7.5% commission and nothing else. */
+/** Receives the 2% commission and nothing else. */
 const FEE_WALLET = new PublicKey("6B9MXLX4tgbHB9eXheHqK6FmPXCwxYP7No51NqRQHAaR");
 const ALICE = Keypair.fromSeed(new Uint8Array(32).fill(101));
 const BOB = Keypair.fromSeed(new Uint8Array(32).fill(102));
@@ -370,7 +370,10 @@ beforeAll(async () => {
     TIER_CAPS_SOL: "1,10,100",
     MIN_DEPOSIT_LAMPORTS: "10000000",
     MAX_DEPOSIT_LAMPORTS: "1000000000",
-    MAX_ROUND_SIZE_LAMPORTS: "10000000000",
+    // Must be >= the largest tier cap (100 SOL): the program requires every
+    // deposit to satisfy pot <= max_round_size while auto-close fires only at
+    // pot == tier_cap, so a smaller ceiling makes the top lane unfillable.
+    MAX_ROUND_SIZE_LAMPORTS: "100000000000",
     // 2 virtual slots of commit–reveal: asserted, never slept through blindly.
     REVEAL_OFFSET_SLOTS: "2",
     LEDGER_MODE: "local",
@@ -549,7 +552,7 @@ describe("deposit → round → payout on a fake devnet RPC", () => {
     expect(open.round.status).toBe("FULL");
   });
 
-  it("locks, settles and pays 92.5% + 7.5% exactly once", async () => {
+  it("locks, settles and pays 98% + 2% exactly once", async () => {
     const escrowBeforePayout = devnet.balance(OPERATOR.publicKey);
     const balancesBefore = new Map(
       [ALICE, BOB].map((w) => [w.publicKey.toBase58(), devnet.balance(w.publicKey)])
@@ -585,7 +588,7 @@ describe("deposit → round → payout on a fake devnet RPC", () => {
     const frozen = await driver.backend.getRound(round1);
     const winner = frozen!.winner.toBase58();
     expect([ALICE.publicKey.toBase58(), BOB.publicKey.toBase58()]).toContain(winner);
-    expect(frozen!.feeLamports).toBe(FEE_ON_TIER_CAP); // 7.5%
+    expect(frozen!.feeLamports).toBe(FEE_ON_TIER_CAP); // 2%
     expect(frozen!.payoutLamports).toBe(PAYOUT_ON_TIER_CAP); // 92.5%
     expect(round.winner).toBeUndefined(); // not published before the payout
     expect(round.status).toBe("RANDOMNESS_PENDING");
@@ -604,7 +607,7 @@ describe("deposit → round → payout on a fake devnet RPC", () => {
     expect(paid!.attempts).toBe(1);
     expect(paid!.confirmedAt).not.toBeNull();
 
-    // 7.5% is exactly 750 bps, in integer lamports, with nothing lost.
+    // 2% is exactly 200 bps, in integer lamports, with nothing lost.
     expect(FEE_ON_TIER_CAP * 10_000n).toBe(TIER_CAP * BigInt(FEE_BPS));
     expect(FEE_ON_TIER_CAP + PAYOUT_ON_TIER_CAP).toBe(TIER_CAP);
 
@@ -618,7 +621,7 @@ describe("deposit → round → payout on a fake devnet RPC", () => {
     ]);
     expect(broadcast.transfers.reduce((sum, t) => sum + t.amount, 0n)).toBe(TIER_CAP);
 
-    // Real balances: the fee wallet got 7.5% and only 7.5%, the winner got
+    // Real balances: the fee wallet got 2% and only 2%, the winner got
     // the rest, and the escrow paid the pot out (plus its own transaction fee).
     expect(devnet.balance(FEE_WALLET)).toBe(FEE_ON_TIER_CAP);
     const loser = winner === ALICE.publicKey.toBase58() ? BOB : ALICE;

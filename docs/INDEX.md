@@ -15,6 +15,7 @@
 | [TESTING.md](./TESTING.md) | Test layers and commands |
 | [PAYMENTS.md](./PAYMENTS.md) | Player wallet → escrow → settlement → fee wallet flow, the two runtimes (`chain`/`local`), idempotence, admin |
 | [ADMIN.md](./ADMIN.md) | Operator console: token auth, key handling, endpoints, deposit kill switch, Render env vars |
+| [DEVNET_LEGACY_STATE.md](./DEVNET_LEGACY_STATE.md) | Known devnet test leftovers (stranded rounds, escrow balances) — documentation only, no recovery path |
 
 **Standing rules:** DEVNET-only by default; mainnet requires `ENABLE_MAINNET=true`
 plus the legal checklist. Consult and update these docs before major changes.

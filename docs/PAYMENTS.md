@@ -10,13 +10,13 @@ PLAYER WALLET ──SystemProgram.transfer──► ROUND ESCROW (devnet custody
                                               │  payout transaction at settlement
                         ┌─────────────────────┴─────────────────────┐
                         ▼                                           ▼
-        WINNER (92.5% = pot − fee)                    PLATFORM FEE WALLET (7.5%)
+        WINNER (98% = pot − fee)                    PLATFORM FEE WALLET (2%)
 ```
 
 - Player deposits **never** touch the fee wallet.
-- The fee wallet **only receives** the 7.5% commission.
+- The fee wallet **only receives** the 2% commission.
 - Fee math is integer-only: `fee = pot × fee_bps / 10_000` (floor),
-  `payout = pot − fee`. Example: 10 SOL pot → 0.75 SOL fee → 9.25 SOL winner.
+  `payout = pot − fee`. Example: 10 SOL pot → 0.2 SOL fee → 9.8 SOL winner.
 - The pot is **the sum of CONFIRMED deposits**. A PENDING or FAILED
   transaction contributes nothing, no matter what any client reports.
 
@@ -83,7 +83,7 @@ same record instead of creating a second one.
 ```
 1  winner frozen by settle_round
 2  pot := Σ CONFIRMED deposits for the round
-3  fee := pot × 750 / 10_000        payout := pot − fee
+3  fee := pot × 200 / 10_000        payout := pot − fee
 4  escrow balance check — never broadcast what the pool cannot fund
 5  build ONE transaction: fee → fee wallet, payout → winner
 6  sign with the server-side operator key, send to devnet, wait for confirmed
@@ -128,7 +128,7 @@ assume the escrow balance equals the sum of credited entries.
 | Env var | Meaning |
 |---|---|
 | `PLATFORM_FEE_WALLET` | Public fee address (`6B9MX…HAaR`). Public key only, never a keypair. |
-| `PLATFORM_FEE_BPS` | `750` (7.5%), frozen at round lock. |
+| `PLATFORM_FEE_BPS` | `200` (2%), frozen at round lock. |
 | `OPERATOR_KEYPAIR` | **Server-side secret** that signs payouts. Never sent to the browser. |
 | `DEPOSIT_ESCROW_WALLET` | Public address that receives deposits. Defaults to the operator address. **Must be the public address of `OPERATOR_KEYPAIR`** — the escrow is also the payout source, so a foreign address is refused (`custodyReady: false`). |
 | `SOLANA_RPC_URL` | Devnet RPC. Default `https://api.devnet.solana.com`. |
@@ -155,7 +155,7 @@ Then in **Settings → Environment** (server-side, never in the browser):
 | `SOLANA_RPC_URL` | `https://api.devnet.solana.com` |
 | `OPERATOR_KEYPAIR` | the 64-byte JSON array the script printed |
 | `DEPOSIT_ESCROW_WALLET` | the same script's address (operator pubkey) |
-| `PLATFORM_FEE_WALLET` | your own devnet address (7.5% commission) |
+| `PLATFORM_FEE_WALLET` | your own devnet address (2% commission) |
 
 `OPERATOR_KEYPAIR` accepts a JSON array **or** a base58 secret key
 (`apps/api/src/keypair.ts`). Fund the escrow address with devnet SOL
@@ -182,7 +182,7 @@ signature, RPC result, confirmation status and error:
 ```json
 {"event":"deposit.confirmed","wallet":"…","amountLamports":"100000000",
  "recipient":"…","network":"devnet","signature":"…","explorer":"https://explorer.solana.com/tx/…?cluster=devnet","status":"CONFIRMED"}
-{"event":"payout.confirmed","wallet":"…","feeLamports":"75000000",
+{"event":"payout.confirmed","wallet":"…","feeLamports":"20000000",
  "feeWallet":"6B9MX…","signature":"…","status":"CONFIRMED"}
 ```
 

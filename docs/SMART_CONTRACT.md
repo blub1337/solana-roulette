@@ -8,8 +8,8 @@
 #[account]
 pub struct GlobalConfig {
     pub operator: Pubkey,        // signs lifecycle txs (devnet server keypair)
-    pub treasury: Pubkey,        // receives 7.5% fee
-    pub fee_bps: u16,            // 750 (7.5%)
+    pub treasury: Pubkey,        // receives 2% fee
+    pub fee_bps: u16,            // 200 (2%)
     pub max_round_size: u64,     // 10_000_000_000 lamports (10 SOL)
     pub min_deposit: u64,        // lamports
     pub max_deposit: u64,        // lamports
@@ -60,11 +60,12 @@ pub struct Participant {
 | Instruction | Signer | Validation highlights |
 |---|---|---|
 | `initialize_config(operator, treasury, fee_bps, max_round_size, min_deposit, max_deposit)` | payer=deployer | fee_bps ≤ 3000; min ≤ max; not re-initializable |
+| `set_fee(fee_bps)` | operator (config.operator) | Added by the in-place 2026-09 upgrade (fee correction 750→200): fee_bps ≤ 3000; takes effect from the next round's fee snapshot (create/lock) — never retroactively |
 | `create_round()` | operator | Derives Round #id from config counter; status=OPEN |
 | `deposit(amount)` | depositor | status==OPEN; min ≤ amount ≤ max; pot+amount ≤ max_round_size (else `RoundOverCap` — no truncation); lamports move wallet→escrow; Participant PDA created with cumulative weight_start |
-| `lock_round()` | operator | status==FULL → RANDOMNESS_PENDING; freezes fee_bps, commits lock_slot/reveal_slot |
-| `settle_round()` | operator | status==RANDOMNESS_PENDING; slot ≥ reveal_slot; SlotHashes sysvar contains reveal blockhash; computes randomness, ticket, winner, fee and payout and freezes them (no lamports move) |
-| `pay_winners()` | operator | status==RANDOMNESS_PENDING with a frozen winner; escrow pays 92.5% to the winner and 7.5% to the treasury atomically, then status=COMPLETED |
+| `lock_round()` | permissionless | status==FULL → RANDOMNESS_PENDING; freezes fee_bps, commits lock_slot/reveal_slot |
+| `settle_round()` | permissionless | status==RANDOMNESS_PENDING; slot ≥ reveal_slot; SlotHashes sysvar (address-pinned) contains reveal blockhash; computes randomness, ticket, winner, fee and payout and freezes them (no lamports move) |
+| `pay_winners()` | permissionless | status==RANDOMNESS_PENDING with a frozen winner; escrow pays 98% to the winner and 2% to the treasury atomically, then status=COMPLETED |
 | `cancel_round()` | operator | From OPEN/FULL; refunds every participant's exact deposit from escrow; status=CANCELLED |
 
 State machine transitions are exhaustive-matched; any other transition returns
@@ -111,7 +112,7 @@ winner          = the participant i where weight_start_i ≤ ticket < weight_sta
 ## 5. Lamport flows
 
 - deposit: `system_program::transfer(wallet → escrow)` signed by wallet.
-- settle: escrow PDA signs two transfers (escrow→winner 92.5%, escrow→treasury 7.5%);
+- settle: escrow PDA signs two transfers (escrow→winner 98%, escrow→treasury 2%);
   escrow seeds are re-derived in the instruction so the PDA is a valid signer.
 - cancel: escrow signs per-participant refunds of exact deposited amounts.
 

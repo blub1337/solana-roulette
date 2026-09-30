@@ -9,8 +9,11 @@ import { resolveBackend, type ChainBackend } from "./backend.js";
 import { registerPreviewProxy } from "./previewProxy.js";
 import { describeCustody, resolveCustody, type Custody } from "./custody.js";
 import { registerAdminRoutes } from "./adminRoutes.js";
+import { historyDeps, rehydrateCompletedRounds } from "./history.js";
 import { hydrateAdminState, initAdminState, depositState } from "./adminState.js";
+import { createFeeResolver } from "./feeTerms.js";
 import { reconcilePendingDeposits, type DepositDeps } from "./deposits.js";
+import { postgresMirror, store } from "./store.js";
 import { ensureRoundPaid, type PayoutOutcome, type PayoutTarget } from "./payout.js";
 import { txLog, safeEndpoint } from "./logger.js";
 
@@ -27,6 +30,7 @@ export async function buildServer(deps?: ApiDeps) {
   // an operator paused deposits before the last restart (never the reverse).
   initAdminState(cfg.depositsPaused);
   await hydrateAdminState();
+  await restoreTransactionLedger();
   const connection =
     deps?.connection ?? new Connection(cfg.rpcUrl, { commitment: "confirmed" });
   const programId = deps?.programId ?? new PublicKey(cfg.programId);
@@ -75,7 +79,12 @@ export async function buildServer(deps?: ApiDeps) {
     commit: process.env.GIT_SHA ?? "dev",
   }));
 
-  await registerRoutes(app, { backend: active, connection, programId, cfg, custody });
+  // One resolver for the whole process: the fee the runtime really charges
+  // (on-chain config in chain mode, the environment in local mode). Every
+  // response that mentions the fee reads it from here — see feeTerms.ts.
+  const effectiveFee = createFeeResolver(active, cfg);
+
+  await registerRoutes(app, { backend: active, connection, programId, cfg, custody, effectiveFee });
   // Admin console API. Fails closed without ADMIN_TOKEN — there is no
   // read-only fallback, and it can only ever return public addresses.
   await registerAdminRoutes(app, {
@@ -84,6 +93,7 @@ export async function buildServer(deps?: ApiDeps) {
     cfg,
     custody,
     backendReason,
+    effectiveFee,
   });
 
   // Dev/preview only: serve the UI through the same public port as the API.
@@ -111,6 +121,16 @@ export async function buildServer(deps?: ApiDeps) {
   const driverDeps: SettlementDriverDeps = { backend: active, cfg, payouts: payoutService };
   startSettlementDriver(driverDeps);
 
+  // Rebuild history from the chain before the first request can ask for it.
+  // Deliberately NOT awaited before listen(): a slow RPC must not delay boot,
+  // and the route re-runs the same merge on read anyway. Never throws.
+  void rehydrateCompletedRounds(historyDeps(active, connection, programId)).then((report) => {
+    app.log.info(
+      `[history] rehydrated ${report.recovered} completed round(s)` +
+        (report.highest ? ` (newest #${report.highest})` : "")
+    );
+  });
+
   // Reconciler: deposits that never reached the chain must not stay PENDING,
   // and must never be credited after a refresh.
   const reaperMs = Number(process.env.DEPOSIT_RECONCILE_MS ?? 15_000);
@@ -121,6 +141,39 @@ export async function buildServer(deps?: ApiDeps) {
   }, reaperMs).unref();
 
   return app;
+}
+
+/**
+ * Put the idempotence guards back in place before the first request.
+ *
+ * The transaction state machine is held in memory and written through to the
+ * audit mirror, so a restart would otherwise forget every CONFIRMED deposit,
+ * every spent signature and every paid round — the exact conditions under
+ * which the same transfer can be presented twice. Restoring is read-only,
+ * bounded by `RESTORE_TIMEOUT_MS` and never fatal: without a database the
+ * process simply relies on what it observes itself from that point on.
+ */
+const RESTORE_TIMEOUT_MS = 3_000;
+
+async function restoreTransactionLedger(): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), RESTORE_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  try {
+    const result = await Promise.race([postgresMirror.readChainTxs(), deadline]);
+    if (result === "timeout") {
+      txLog.warn("ledger.restore_timeout", { timeoutMs: RESTORE_TIMEOUT_MS });
+      return;
+    }
+    const restored = store.txs.restore(result);
+    txLog.info("ledger.restored", { restored, mirrored: result.length });
+  } catch (err) {
+    txLog.warn("ledger.restore_failed", { error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export async function start() {

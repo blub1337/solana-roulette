@@ -11,6 +11,7 @@ import type { ChainBackend } from "./backend.js";
 import type { RoundData, ParticipantData, GlobalConfigData } from "@solana-roulette/verification";
 import { store } from "./store.js";
 import { cancelDeposit, confirmDeposit, createDepositIntent, reconcilePendingDeposits } from "./deposits.js";
+import { LocalLedgerError } from "./localLedger.js";
 import { resolveCustody, type Custody } from "./custody.js";
 import { depositMessage } from "@solana-roulette/types";
 
@@ -72,7 +73,7 @@ function makeRound(over: Partial<RoundData> = {}): RoundData {
     participantCount: 0,
     lockSlot: 0n,
     revealSlot: 0n,
-    feeBps: 750,
+    feeBps: 200,
     randomness: new Uint8Array(32),
     winningTicket: 0n,
     winner: PublicKey.default,
@@ -91,11 +92,14 @@ interface HarnessOptions {
   /** What the devnet RPC returns for getParsedTransaction. */
   tx?: ParsedTransactionWithMeta | null;
   escrowBalance?: bigint;
+  /** Awaited inside getParsedTransaction, to orchestrate concurrent callers. */
+  beforeVerify?: () => Promise<void>;
 }
 
 function harness(opts: HarnessOptions) {
   const round = makeRound({ id: opts.roundId, ...opts.round });
   const credited: Array<{ wallet: string; lamports: bigint }> = [];
+  const seen = new Set<string>();
 
   const backend: ChainBackend = {
     mode: "local",
@@ -122,8 +126,15 @@ function harness(opts: HarnessOptions) {
       return null;
     },
     async deposit(args) {
-      // The runtime only ever sees a transfer the server verified on chain.
-      credited.push({ wallet: args.wallet.toBase58(), lamports: args.lamports });
+      // The runtime only ever sees a transfer the server verified on chain —
+      // and, like the program and the ledger, it takes ONE entry per wallet per
+      // round. A racing confirmation therefore gets rejected, not double-counted.
+      const wallet = args.wallet.toBase58();
+      if (seen.has(wallet)) {
+        throw new LocalLedgerError("DuplicateDeposit", `${wallet} already has an entry in this round`);
+      }
+      seen.add(wallet);
+      credited.push({ wallet, lamports: args.lamports });
       round.pot += args.lamports;
       round.participantCount += 1;
       return { signature: "runtime", roundId: round.id };
@@ -134,7 +145,10 @@ function harness(opts: HarnessOptions) {
   };
 
   const connection = {
-    getParsedTransaction: async () => (opts.tx === undefined ? null : opts.tx),
+    getParsedTransaction: async () => {
+      await opts.beforeVerify?.();
+      return opts.tx === undefined ? null : opts.tx;
+    },
     getBalance: async () => Number(opts.escrowBalance ?? 0n),
     getSlot: async () => 1,
   } as unknown as Connection;
@@ -314,6 +328,108 @@ describe("deposit confirmation (chain is the source of truth)", () => {
     const again = await confirmDeposit(deps, { depositId: intent.depositId, signature });
     expect(again.status).toBe(200);
     expect(credited).toHaveLength(1);
+  });
+
+  it("survives TWO confirmations racing on the same deposit", async () => {
+    // for the same record while it is still PENDING. Whoever gets there second
+    // finds the record CONFIRMED and the runtime rejecting the second credit —
+    // it must report the authoritative CONFIRMED state, not fail the request:
+    // the player HAS paid and the entry IS in the pot.
+    const { roundId, seed } = nextCase();
+    const amount = 60_000_000n;
+    const signature = "j".repeat(64);
+    const wallet = player(seed);
+
+    // Both callers are held inside the chain read, so both pass the PENDING
+    // check before either of them can settle the record.
+    let arrived = 0;
+    let openTheGate!: () => void;
+    const bothInside = new Promise<void>((r) => (openTheGate = r));
+    const beforeVerify = async () => {
+      arrived += 1;
+      if (arrived === 2) openTheGate();
+      await bothInside;
+    };
+
+    const { deps, credited, round } = harness({
+      roundId,
+      tx: transferTx({ from: wallet.publicKey, to: ESCROW, lamports: amount }),
+      beforeVerify,
+    });
+    const intent = await createDepositIntent(deps, { roundId, wallet: wallet.publicKey, amountLamports: amount });
+
+    const [a, b] = await Promise.all([
+      confirmDeposit(deps, { depositId: intent.depositId, signature }),
+      confirmDeposit(deps, { depositId: intent.depositId, signature }),
+    ]);
+
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
+    expect(b.body.credited).toBe(true);
+    expect(credited).toHaveLength(1); // credited exactly once
+    expect(round.pot).toBe(amount);
+    expect(round.participantCount).toBe(1);
+    expect(store.txs.get(intent.depositId)?.depositStatus).toBe("CONFIRMED");
+    expect(store.txs.confirmedPotLamports(roundId)).toBe(amount);
+  });
+
+  it("a cancel that wins the race does not leave a credited deposit marked FAILED", async () => {
+    // The client's send times out while the server's verification is still
+    // reading the chain, so it reports "rejected" and the record goes FAILED.
+    // The transfer is real and the round credits it anyway — the record must
+    // then say CONFIRMED, because the payout is computed from CONFIRMED
+    // deposits only and a FAILED row would pay the winner short.
+    const { roundId, seed } = nextCase();
+    const amount = 40_000_000n;
+    const signature = "k".repeat(64);
+    const wallet = player(seed);
+
+    let arrived = 0;
+    let openTheGate!: () => void;
+    const waiting = new Promise<void>((r) => (openTheGate = r));
+    const beforeVerify = async () => {
+      arrived += 1;
+      if (arrived === 1) setTimeout(openTheGate, 0); // let the cancel land first
+      await waiting;
+    };
+
+    const { deps, credited } = harness({
+      roundId,
+      tx: transferTx({ from: wallet.publicKey, to: ESCROW, lamports: amount }),
+      beforeVerify,
+    });
+    const intent = await createDepositIntent(deps, { roundId, wallet: wallet.publicKey, amountLamports: amount });
+
+    const confirming = confirmDeposit(deps, { depositId: intent.depositId, signature });
+    // The cancel lands while the confirmation is parked in the chain read.
+    while (store.txs.get(intent.depositId)?.depositStatus !== "PENDING") await Promise.resolve();
+    const cancel = cancelDeposit(intent.depositId, "wallet send timed out");
+    expect(cancel.status).toBe(200); // marked FAILED first
+
+    const res = await confirming;
+    expect(res.status).toBe(200);
+    expect(res.body.credited).toBe(true);
+    expect(credited).toHaveLength(1);
+    expect(store.txs.get(intent.depositId)?.depositStatus).toBe("CONFIRMED");
+    expect(store.txs.confirmedPotLamports(roundId)).toBe(amount);
+  });
+
+  it("a cancel that arrives after the confirmation is refused, not thrown", async () => {
+    const { roundId, seed } = nextCase();
+    const amount = 30_000_000n;
+    const signature = "l".repeat(64);
+    const wallet = player(seed);
+    const { deps } = harness({
+      roundId,
+      tx: transferTx({ from: wallet.publicKey, to: ESCROW, lamports: amount }),
+    });
+    const intent = await createDepositIntent(deps, { roundId, wallet: wallet.publicKey, amountLamports: amount });
+    await confirmDeposit(deps, { depositId: intent.depositId, signature });
+
+    const late = cancelDeposit(intent.depositId, "wallet send timed out");
+    expect(late.status).toBe(409);
+    expect(late.body.error).toBe("already_confirmed");
+    expect(store.txs.get(intent.depositId)?.depositStatus).toBe("CONFIRMED");
   });
 });
 

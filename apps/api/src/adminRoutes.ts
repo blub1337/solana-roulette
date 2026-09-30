@@ -32,6 +32,7 @@ import { roundToDto, entryToDto } from "./serialize.js";
 import { tierCapLamports } from "./settlement.js";
 import { store } from "./store.js";
 import { txToDto, type TxKind, type TxStatus } from "./txLedger.js";
+import type { EffectiveFeeResolver } from "./feeTerms.js";
 
 interface AdminRouteDeps {
   backend: ChainBackend;
@@ -39,6 +40,8 @@ interface AdminRouteDeps {
   cfg: AppConfig;
   custody: Custody;
   backendReason: string;
+  /** The fee the runtime actually enforces (feeTerms.ts). */
+  effectiveFee: EffectiveFeeResolver;
 }
 
 /** Guard: replies 401/403/429 and returns false when the caller is rejected. */
@@ -111,6 +114,7 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
     const inventory = await roundInventory(backend, cfg);
     const counts = store.txs.counts();
     const state = depositState();
+    const fee = await deps.effectiveFee();
 
     return {
       generatedAt: new Date().toISOString(),
@@ -148,10 +152,10 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
         custodyReason: custody.reason,
       },
       rules: {
-        feeBps: cfg.feeBps,
-        feePercent: (cfg.feeBps / 100).toFixed(2),
-        winnerShareBps: 10_000 - cfg.feeBps,
-        winnerSharePercent: ((10_000 - cfg.feeBps) / 100).toFixed(2),
+        feeBps: fee.feeBps,
+        feePercent: (fee.feeBps / 100).toFixed(2),
+        winnerShareBps: fee.winnerShareBps,
+        winnerSharePercent: (fee.winnerShareBps / 100).toFixed(2),
         minDepositLamports: cfg.minDepositLamports.toString(),
         maxDepositLamports: cfg.maxDepositLamports.toString(),
         revealOffsetSlots: cfg.revealOffsetSlots,
@@ -162,9 +166,7 @@ export async function registerAdminRoutes(app: FastifyInstance, deps: AdminRoute
           capLamports: tierCapLamports(cfg, tier as Tier).toString(),
           capSol: Number(tierCapLamports(cfg, tier as Tier)) / 1_000_000_000,
         })),
-        source:
-          "env (PLATFORM_FEE_BPS / TIER_CAPS_SOL) — enforced on-chain at initialize_config; " +
-          "not editable from the admin API by design",
+        source: `${fee.source} · pool caps from TIER_CAPS_SOL`,
       },
       fees: {
         wallet: cfg.platformFeeWallet ?? null,

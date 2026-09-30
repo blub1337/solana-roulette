@@ -3,7 +3,7 @@
  *
  *   1. the round has a frozen winner and a pot made only of CONFIRMED deposits
  *   2. the pot is recomputed FROM the confirmed deposits (never from a client
- *      value) and split 7.5% platform fee / 92.5% winner, integer lamports
+ *      value) and split 2% platform fee / 98% winner, integer lamports
  *   3. the server signs ONE transaction that moves fee → fee wallet and
  *      payout → winner, and sends it to the devnet RPC
  *   4. the transaction is re-read from the chain and must be error-free with
@@ -34,6 +34,20 @@ import { txLog } from "./logger.js";
 /** A submitted payout that cannot be found on chain after this long is treated
  *  as lost (never as paid) and may be retried as a new attempt. */
 const RESUME_GRACE_MS = 120_000;
+
+/**
+ * Payouts currently in flight, keyed by round.
+ *
+ * `ensureRoundPaid` is documented as safe to call on every settlement tick, so
+ * the function itself has to survive concurrent callers. Without this guard two
+ * overlapping calls (two ticks, or a tick plus a manual retry) both pass the
+ * "already paid?" check, both resolve the SAME payout record through the same
+ * idempotency key, and both broadcast a transfer — the winner is paid twice and
+ * the second send only fails afterwards, when its signature collides with the
+ * first. Serialising per round closes that window: the second caller awaits the
+ * first caller's outcome instead of starting a second payment.
+ */
+const inFlightPayouts = new Map<string, Promise<PayoutOutcome>>();
 
 export interface PayoutDeps {
   backend: ChainBackend;
@@ -66,9 +80,25 @@ export type PayoutOutcome =  | {
 /**
  * Make sure the winner of `target` has been paid, on chain, exactly once.
  * Safe to call on every settlement tick: an already CONFIRMED payout returns
- * immediately without sending anything.
+ * immediately without sending anything, and a call that arrives while the same
+ * round is still being paid shares that payment's result.
  */
-export async function ensureRoundPaid(deps: PayoutDeps, target: PayoutTarget): Promise<PayoutOutcome> {
+export function ensureRoundPaid(deps: PayoutDeps, target: PayoutTarget): Promise<PayoutOutcome> {
+  const key = target.roundId.toString();
+  const running = inFlightPayouts.get(key);
+  if (running) {
+    txLog.warn("payout.joined_in_flight", { roundId: key, status: "PENDING" });
+    return running;
+  }
+  const attempt = payRoundOnce(deps, target).finally(() => {
+    inFlightPayouts.delete(key);
+  });
+  inFlightPayouts.set(key, attempt);
+  return attempt;
+}
+
+/** The actual payment attempt; `ensureRoundPaid` owns the concurrency guard. */
+async function payRoundOnce(deps: PayoutDeps, target: PayoutTarget): Promise<PayoutOutcome> {
   const { connection, custody, cfg } = deps;
   if (!custody.ready) return { status: "SKIPPED", reason: custody.reason };
 

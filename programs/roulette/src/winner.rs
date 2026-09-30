@@ -83,7 +83,9 @@ pub fn pick_winner(
 /// Computed on each call — a cached `static` (OnceLock) emits a `.bss`
 /// symbol with a mangled name longer than the 16 bytes the SBF loader's ELF
 /// parser allows, which makes `solana program deploy` reject the binary.
-fn participant_discriminator() -> [u8; 8] {
+/// `pub(crate)` so `cancel_round`'s refund loop applies the same
+/// account-identity check as `pick_winner` (owner + discriminator).
+pub(crate) fn participant_discriminator() -> [u8; 8] {
     let hash = Sha256::digest(b"account:Participant");
     let mut out = [0u8; 8];
     out.copy_from_slice(&hash[0..8]);

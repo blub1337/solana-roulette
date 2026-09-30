@@ -4,9 +4,9 @@
  * Admin console — the operator's view of the platform.
  *
  * What it shows: devnet/mainnet state, the RPC, the escrow / operator / fee
- * wallet addresses, the live escrow balance, the 7.5% fee and the three pool
- * caps, the deposit Active/Paused switch, open and completed rounds, the
- * deposit/payout transaction ledger and the transaction log.
+ * wallet addresses, the live escrow balance, the enforced platform fee and the
+ * three pool caps, the deposit Active/Paused switch, open and completed rounds,
+ * the deposit/payout transaction ledger and the transaction log.
  *
  * What it can NEVER do — by design, not by omission:
  *   - see, upload or download a private key, a seed phrase or OPERATOR_KEYPAIR
@@ -525,7 +525,7 @@ export default function AdminPage() {
                   : null}
               />
               <Address
-                label="Fee wallet (7.5% treasury)"
+                label={`Fee wallet (${overview.rules.feePercent}% treasury)`}
                 value={overview.custody.feeWallet}
                 href={`https://explorer.solana.com/address/${overview.custody.feeWallet}?cluster=devnet`}
               />
@@ -829,7 +829,7 @@ export default function AdminPage() {
       ) : null}
 
       <footer className="mt-10 border-t border-felt-700 pt-6 text-center text-xs text-ivory/40">
-        Deposits, round closing, winner selection, the 7.5% fee and payouts run automatically. This console
+        Deposits, round closing, winner selection, the {overview?.rules.feePercent ?? "—"}% fee and payouts run automatically. This console
         observes them and can switch deposits off — nothing else.
       </footer>
     </main>

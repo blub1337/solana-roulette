@@ -33,7 +33,7 @@ export const TX_FEE_BUFFER_LAMPORTS = 10_000n;
 export class MainnetCustodyDisabledError extends Error {
   constructor() {
     super(
-      "Custody is DEVNET ONLY: Solana Roulette refuses to move funds on mainnet-beta."
+      "Custody is DEVNET ONLY: SolRoll refuses to move funds on mainnet-beta."
     );
     this.name = "MainnetCustodyDisabledError";
   }
@@ -53,7 +53,7 @@ export interface Custody {
   readonly rpcUrl: string;
   /** System account that receives player deposits. */
   readonly escrow: PublicKey | null;
-  /** Receives the 7.5% platform fee of every settled round. */
+  /** Receives the 2% platform fee of every settled round. */
   readonly feeWallet: PublicKey;
   /** Server-side payout signer. Secret: never serialized, never sent to a client. */
   readonly signer: Keypair | null;

@@ -241,6 +241,16 @@ export async function confirmDeposit(
     };
   }
 
+  // A second confirmation of the same deposit can land while this one was
+  // reading the chain. From here on the ledger decides: if the record already
+  // went terminal, report that state instead of overwriting it.
+  const replayConfirmed = async (
+    current: ChainTx | null
+  ): Promise<{ status: number; body: Record<string, unknown> } | null> =>
+    current?.depositStatus === "CONFIRMED"
+      ? { status: 200, body: await confirmedBody(current, backend) }
+      : null;
+
   // Signature is real, error-free and moved the player's own lamports into the
   // escrow. Bind it, then credit.
   try {
@@ -262,22 +272,50 @@ export async function confirmDeposit(
     if (err instanceof LocalLedgerError) {
       // The money arrived but the round rejected it (cap/duplicate/status).
       // Record the failure — the pot is NOT credited.
-      store.txs.failPending(existing.id, `${err.code}: ${err.message}`);
+      const terminal = failUnlessTerminal(existing.id, `${err.code}: ${err.message}`);
+      const replay = await replayConfirmed(terminal);
+      if (replay) return replay;
+      // Lamports are in the escrow but no round owns them: visible in the
+      // admin console and the audit mirror, never a silent FAILED row.
+      txLog.error("deposit.arrived_not_credited", {
+        id: existing.id,
+        roundId: existing.roundId,
+        wallet: existing.wallet,
+        network: custody.cluster,
+        amountLamports: existing.depositAmountLamports,
+        signature: args.signature,
+        recipient: existing.recipient,
+        status: "FAILED",
+        error: `${err.code}: ${err.message}`,
+      });
+      store.mirrorFailure(
+        "deposit.arrived_not_credited",
+        `round=${existing.roundId} wallet=${existing.wallet} signature=${args.signature} ${err.code}`
+      );
       return {
         status: err.code === "DuplicateDeposit" ? 409 : 422,
-        body: { error: err.code, detail: err.message, depositId: existing.id, credited: false },
+        body: {
+          error: err.code,
+          detail: err.message,
+          depositId: existing.id,
+          credited: false,
+          fundsInEscrow: true,
+        },
       };
     }
     const detail = err instanceof Error ? err.message : String(err);
-    store.txs.failPending(existing.id, detail);
+    const terminal = failUnlessTerminal(existing.id, detail);
+    const replay = await replayConfirmed(terminal);
+    if (replay) return replay;
     store.mirrorFailure("deposit.credit", detail);
     return { status: 500, body: { error: "credit_failed", detail, credited: false } };
   }
 
-  const confirmed = store.txs.settle(existing.id, "CONFIRMED", {
-    signature: args.signature,
-    confirmedAt: new Date(),
-  });
+  // The money is proven and the round credited — record that. A cancel or the
+  // expiry reaper may have marked the record FAILED while this confirmation was
+  // reading the chain; CONFIRMED must win, because the payout is computed from
+  // CONFIRMED deposits only and the pot now contains these lamports.
+  const confirmed = confirmOrRevive(existing.id, args.signature);
   // The chain decides: re-read the Round PDA for the authoritative pot/status.
   const round = await backend.getRound(roundId);
   store.upsertRound({
@@ -337,6 +375,41 @@ export async function confirmDeposit(
   return { status: 200, body };
 }
 
+/**
+ * Settle a verified deposit as CONFIRMED, or revive it when a cancel/expiry
+ * marked it FAILED while this confirmation was reading the chain.
+ */
+function confirmOrRevive(id: string, signature: string): ChainTx {
+  try {
+    return store.txs.settle(id, "CONFIRMED", { signature, confirmedAt: new Date() });
+  } catch (err) {
+    if (err instanceof TxStateError && err.code === "already_failed") {
+      return store.txs.confirmProvenArrival(id, { signature, confirmedAt: new Date() });
+    }
+    throw err;
+  }
+}
+
+/**
+ * Move a PENDING record to FAILED unless a concurrent confirmation already
+ * made it terminal, and hand back whatever the ledger actually holds.
+ *
+ * `confirmDeposit` is re-entrant by design — a refresh or a double click
+ * replays the same request — and the chain read in between takes hundreds of
+ * milliseconds, which is long enough for the other request to complete. CONFIRMED
+ * and FAILED are terminal and must never be overwritten, and a late arrival
+ * must report the authoritative state rather than throw (which would surface as
+ * a 500 telling the player their confirmed deposit was not credited).
+ */
+function failUnlessTerminal(id: string, error: string): ChainTx | null {
+  try {
+    store.txs.failPending(id, error);
+  } catch {
+    /* already terminal — fall through and read the authoritative record */
+  }
+  return store.txs.get(id);
+}
+
 /** The player rejected in their wallet, or the send failed: never credit. */
 export function cancelDeposit(depositId: string, reason: string): { status: number; body: Record<string, unknown> } {
   const tx = store.txs.get(depositId);
@@ -347,7 +420,15 @@ export function cancelDeposit(depositId: string, reason: string): { status: numb
   if (tx.depositStatus === "FAILED") {
     return { status: 200, body: txToDto(tx) };
   }
-  const failed = store.txs.failPending(depositId, `rejected: ${reason}`.slice(0, 300));
+  const failed = failUnlessTerminal(depositId, `rejected: ${reason}`.slice(0, 300));
+  if (!failed) return { status: 404, body: { error: "deposit_not_found" } };
+  if (failed.depositStatus === "CONFIRMED") {
+    // The transfer confirmed while the cancel was in flight (the client's send
+    // timed out, the server's verification won the race). The entry stands —
+    // report that instead of a 500 that would read as "your deposit failed".
+    return { status: 409, body: { ...txToDto(failed), error: "already_confirmed" } };
+  }
+  if (failed.depositStatus !== "FAILED") return { status: 200, body: txToDto(failed) };
   txLog.warn("deposit.rejected", {
     id: failed.id,
     roundId: failed.roundId,

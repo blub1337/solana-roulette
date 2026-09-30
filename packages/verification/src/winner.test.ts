@@ -64,17 +64,17 @@ describe("selectWinner", () => {
 });
 
 describe("computeFeeSplit", () => {
-  it("computes 7.5% fee with floor and 92.5% payout", () => {
-    const { fee, payout } = computeFeeSplit(10_000_000_000n, 750);
-    expect(fee).toBe(750_000_000n);
-    expect(payout).toBe(9_250_000_000n);
+  it("computes 2% fee with floor and 98% payout", () => {
+    const { fee, payout } = computeFeeSplit(10_000_000_000n, 200);
+    expect(fee).toBe(200_000_000n);
+    expect(payout).toBe(9_800_000_000n);
     expect(fee + payout).toBe(10_000_000_000n);
   });
 
   it("floors fractional lamports", () => {
-    const { fee, payout } = computeFeeSplit(999n, 750);
-    expect(fee).toBe(74n); // 999*750/10000 = 74.925 -> 74
-    expect(payout).toBe(925n);
+    const { fee, payout } = computeFeeSplit(999n, 200);
+    expect(fee).toBe(19n); // 999*200/10000 = 19.98 -> 19
+    expect(payout).toBe(980n);
     expect(fee + payout).toBe(999n);
   });
 

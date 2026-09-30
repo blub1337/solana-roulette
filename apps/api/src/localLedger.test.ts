@@ -28,7 +28,7 @@ function makeLedger() {
     programId: PROGRAM_ID,
     operator: LocalLedger.deriveOperator(PROGRAM_ID),
     treasury: TREASURY,
-    feeBps: 750,
+    feeBps: 200,
     tierCaps: [CAP, 10n * CAP, 100n * CAP],
     minDeposit: MIN,
     maxDeposit: MAX,
@@ -119,7 +119,7 @@ describe("local ledger: round lifecycle", () => {
     l.lockRound(id);
     const locked = l.getRound(id)!;
     expect(locked.status).toBe("RANDOMNESS_PENDING");
-    expect(locked.feeBps).toBe(750);
+    expect(locked.feeBps).toBe(200);
     expect(locked.revealSlot).toBe(locked.lockSlot + 32n);
 
     // Settling before the reveal slot must fail.
@@ -129,8 +129,8 @@ describe("local ledger: round lifecycle", () => {
     l.settleRound(id);
     const settled = l.getRound(id)!;
     expect(settled.status).toBe("RANDOMNESS_PENDING"); // phase 1 does not move funds
-    expect(settled.feeLamports).toBe(75_000_000n); // 1 SOL * 7.5%
-    expect(settled.payoutLamports).toBe(925_000_000n); // 92.5%
+    expect(settled.feeLamports).toBe(20_000_000n); // 1 SOL * 2%
+    expect(settled.payoutLamports).toBe(980_000_000n); // 98%
     expect(settled.winner).not.toEqual(PublicKey.default);
 
     const winner = settled.winner;
@@ -138,8 +138,8 @@ describe("local ledger: round lifecycle", () => {
     l.payWinners(id);
     const paid = l.getRound(id)!;
     expect(paid.status).toBe("COMPLETED");
-    expect(l.receivedBy(winner)).toBe(before + 925_000_000n);
-    expect(l.treasuryAccrued).toBe(75_000_000n);
+    expect(l.receivedBy(winner)).toBe(before + 980_000_000n);
+    expect(l.treasuryAccrued).toBe(20_000_000n);
     expect(l.escrowBalance(id)).toBe(0n);
   });
 

@@ -6,17 +6,17 @@ import { Store } from "./store.js";
 import { TIER_CAPS_SOL, TIER_COUNT } from "@solana-roulette/types";
 
 describe("fee split (integer lamports, floor)", () => {
-  it("splits a 10 SOL pot into 0.75 fee + 9.25 payout at 750 bps", () => {
+  it("splits a 10 SOL pot into 0.2 fee + 9.8 payout at 200 bps", () => {
     const pot = 10_000_000_000n;
-    const { fee, payout } = computeFeeSplit(pot, 750);
-    expect(fee).toBe(750_000_000n);
-    expect(payout).toBe(9_250_000_000n);
+    const { fee, payout } = computeFeeSplit(pot, 200);
+    expect(fee).toBe(200_000_000n);
+    expect(payout).toBe(9_800_000_000n);
     expect(fee + payout).toBe(pot);
   });
 
   it("floors fractional lamports", () => {
-    const { fee, payout } = computeFeeSplit(999n, 750);
-    expect(fee).toBe(74n);
+    const { fee, payout } = computeFeeSplit(999n, 200);
+    expect(fee).toBe(19n);
     expect(fee + payout).toBe(999n);
   });
 });
@@ -29,7 +29,7 @@ describe("poolTargetLamports", () => {
 
   it("falls back to max round size when unset", () => {
     const cfg = resolveConfig({} as NodeJS.ProcessEnv);
-    expect(poolTargetLamports(cfg)).toBe(10_000_000_000n);
+    expect(poolTargetLamports(cfg)).toBe(100_000_000_000n);
   });
 });
 

@@ -6,9 +6,9 @@
  * RANDOMNESS_PENDING (it previously required FULL, which made settlement
  * unreachable), and pay runs from the same state once the winner is frozen.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { PublicKey } from "@solana/web3.js";
-import { advanceTierLane } from "./settlement.js";
+import { advanceTierLane, createGuardedTick } from "./settlement.js";
 import type { ChainBackend, LifecycleAction, LifecycleArgs } from "./backend.js";
 import type { RoundData, ParticipantData, GlobalConfigData } from "@solana-roulette/verification";
 import { resolveConfig } from "@solana-roulette/config";
@@ -98,8 +98,8 @@ function harness(opts: { round?: RoundData; slot?: bigint; heads?: bigint[] } = 
         if (r.status !== "RANDOMNESS_PENDING") return null;
         const winner = new PublicKey(new Uint8Array(32).fill(9));
         r.winner = winner;
-        r.feeLamports = 75_000_000n;
-        r.payoutLamports = 925_000_000n;
+        r.feeLamports = 20_000_000n;
+        r.payoutLamports = 980_000_000n;
         return { signature: "sig-settle", roundId: id, winner: winner.toBase58() };
       }
       if (action === "pay") {
@@ -140,8 +140,8 @@ function harness(opts: { round?: RoundData; slot?: bigint; heads?: bigint[] } = 
     freezeWinner(roundId = "1") {
       const r = rounds.get(roundId)!;
       r.winner = new PublicKey(new Uint8Array(32).fill(9));
-      r.feeLamports = 75_000_000n;
-      r.payoutLamports = 925_000_000n;
+      r.feeLamports = 20_000_000n;
+      r.payoutLamports = 980_000_000n;
     },
   };
 }
@@ -219,5 +219,60 @@ describe("settlement driver transitions", () => {
     const h = harness({ round: makeRound({ id: 2n, tier: 1, status: "FULL" }), heads: [2n, 2n, 0n] });
     await advanceTierLane(0, { backend: h.backend, cfg });
     expect(h.calls).toEqual([]);
+  });
+});
+
+/**
+ * The driver runs on an interval, and a pass is not instantaneous (RPC reads,
+ * a reveal-slot wait, a payout broadcast). Overlapping passes each drive the
+ * same lane, so two of them can both decide to open the "next round" — leaving
+ * two OPEN rounds in one lane with the older one and its pot orphaned — or both
+ * start the same payout. The guard makes a pass strictly serial.
+ */
+describe("settlement tick re-entrancy", () => {
+  const deps = { backend: harness({ round: makeRound() }).backend, cfg };
+
+  it("drops a tick that arrives while a pass is still running", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let entered = 0;
+    const pass = vi.fn(async () => {
+      entered += 1;
+      await gate;
+    });
+    const tick = createGuardedTick(deps, pass);
+
+    const first = tick();
+    await Promise.resolve(); // the first pass is now in flight
+    const second = tick(); // an interval tick lands on top of it
+    await Promise.resolve();
+
+    // Exactly one pass may be inside the driver at any time.
+    expect(entered).toBe(1);
+    expect(await second).toBe(false);
+    expect(pass).toHaveBeenCalledTimes(1);
+
+    release();
+    expect(await first).toBe(true);
+  });
+
+  it("runs again once the previous pass finished", async () => {
+    const pass = vi.fn(async () => undefined);
+    const tick = createGuardedTick(deps, pass);
+
+    expect(await tick()).toBe(true);
+    expect(await tick()).toBe(true);
+    expect(pass).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases the guard even when a pass throws, so one error cannot stall settlement", async () => {
+    const pass = vi.fn(async () => {
+      throw new Error("rpc down");
+    });
+    const tick = createGuardedTick(deps, pass);
+
+    await expect(tick()).rejects.toThrow("rpc down");
+    await expect(tick()).rejects.toThrow("rpc down");
+    expect(pass).toHaveBeenCalledTimes(2);
   });
 });

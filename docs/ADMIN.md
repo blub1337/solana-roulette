@@ -11,7 +11,7 @@ Scope, on purpose:
 | **Write** | exactly one switch: **Deposits Active / Paused** |
 | **Never** | upload/store/display a private key, seed phrase or `OPERATOR_KEYPAIR` · change the fee, the pool caps or the network · pick a winner, force a payout, settle a round by hand |
 
-Settlement (round closing, winner selection, the 92.5 %/7.5 % split, payouts and
+Settlement (round closing, winner selection, the 98 %/2 % split, payouts and
 opening the next round) runs **automatically** in `apps/api/src/settlement.ts`.
 The console never has to be open for the platform to work.
 
@@ -97,8 +97,8 @@ Set these on the **API** service (the one running `npm run dev:api` /
 | `DEPOSITS_PAUSED` | no | `false` | boot default of the kill switch |
 | `OPERATOR_KEYPAIR` | **yes** | JSON array of 64 numbers (see below) | DEVNET ONLY — signs payouts |
 | `DEPOSIT_ESCROW_WALLET` | no | public address | must equal the operator address |
-| `PLATFORM_FEE_WALLET` | no | public address | receives the 7.5 % |
-| `PLATFORM_FEE_BPS` | no | `750` | 7.5 % |
+| `PLATFORM_FEE_WALLET` | no | public address | receives the 2 % |
+| `PLATFORM_FEE_BPS` | no | `200` | 2 % |
 | `TIER_CAPS_SOL` | no | `1,10,100` | the three pool caps |
 | `MIN_DEPOSIT_LAMPORTS` / `MAX_DEPOSIT_LAMPORTS` | no | lamports | per-deposit limits |
 | `SOLANA_NETWORK` | no | `devnet` | mainnet needs `ENABLE_MAINNET=true` as well |
@@ -147,7 +147,7 @@ and compares the stored value byte for byte, then tells you to trigger
 already deployed and the script refuses to continue on a mismatch.
 
 The public settings to set alongside it: `DEPOSIT_ESCROW_WALLET` (the operator
-address), `PLATFORM_FEE_WALLET`, `PLATFORM_FEE_BPS=750`, `TIER_CAPS_SOL=1,10,100`,
+address), `PLATFORM_FEE_WALLET`, `PLATFORM_FEE_BPS=200`, `TIER_CAPS_SOL=1,10,100`,
 `DEPOSITS_PAUSED=false`, `SOLANA_NETWORK=devnet`, `SOLANA_RPC_URL`. Add
 `PUSH_PUBLIC_VARS=true` to have the script merge those in the same call.
 

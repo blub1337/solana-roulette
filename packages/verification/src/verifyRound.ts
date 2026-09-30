@@ -157,14 +157,45 @@ export async function verifyRoundData(round: RoundData, deps: VerifyDeps): Promi
       );
     }
 
-    // Fee/payout math must match pot * fee_bps
+    // Fee/payout math must match pot * fee_bps.
+    //
+    // The `|| recorded === 0n` leniency is only valid while the amounts are
+    // still unset. The program writes BOTH amounts at settle phase 1 — the
+    // same instruction that freezes `winner` and `payout_account` — so once a
+    // winner is frozen a zero fee/payout on a non-zero pot is an inconsistency,
+    // not a pending state, and must fail verification. Without this guard the
+    // verifier would bless a round whose recorded split does not match
+    // pot × fee_bps (e.g. a truncated or tampered fee_lamports field).
     const { fee, payout } = computeFeeSplit(round.pot, round.feeBps);
-    add("fee_matches_pot_x_fee_bps", fee === round.feeLamports || round.feeLamports === 0n, `expected=${fee}`);
+    const amountsFrozen =
+      round.winner !== undefined &&
+      !isDefaultPk(round.winner) &&
+      round.payoutAccount.length === 32 &&
+      round.payoutAccount.some((b) => b !== 0);
+    add(
+      "fee_matches_pot_x_fee_bps",
+      fee === round.feeLamports || (!amountsFrozen && round.feeLamports === 0n),
+      `expected=${fee}`
+    );
     add(
       "payout_matches_pot_minus_fee",
-      payout === round.payoutLamports || round.payoutLamports === 0n,
+      payout === round.payoutLamports || (!amountsFrozen && round.payoutLamports === 0n),
       `expected=${payout}`
     );
+
+    // The account frozen to RECEIVE the payout must be the recomputed winner.
+    // settle_round writes payout_account = winner, and pay_winners requires
+    // winner_account == round.winner == round.payout_account — so a recorded
+    // round whose payout_account points anywhere else is an inconsistency a
+    // payout-auditor must flag, not bless.
+    if (amountsFrozen && round.winner) {
+      const payoutPk = new PublicKey(round.payoutAccount);
+      add(
+        "payout_account_matches_recomputed_winner",
+        payoutPk.equals(round.winner),
+        `payout_account=${payoutPk.toBase58()} winner=${round.winner.toBase58()}`
+      );
+    }
 
     if (round.status === "COMPLETED") {
       add("winner_recorded", round.winner !== undefined && !isDefaultPk(round.winner), undefined);

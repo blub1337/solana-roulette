@@ -203,8 +203,8 @@ async function main() {
     console.log(`  signature ${sig}`);
     console.log(`  explorer  https://explorer.solana.com/tx/${sig}?cluster=devnet`);
     check("tx succeeded on chain", !tx!.meta?.err, JSON.stringify(tx!.meta?.err ?? null));
-    check("winner received 92.5% of the pot", deltas[w] === r.payoutLamports, `${deltas[w] ?? 0} = ${sol(deltas[w] ?? 0n)}`);
-    check("treasury received 7.5% of the pot", deltas[TREASURY.toBase58()] === r.feeLamports, `${deltas[TREASURY.toBase58()] ?? 0} = ${sol(deltas[TREASURY.toBase58()] ?? 0n)}`);
+    check("winner received the frozen payout (pot − fee)", deltas[w] === r.payoutLamports, `${deltas[w] ?? 0} = ${sol(deltas[w] ?? 0n)}`);
+    check("treasury received the frozen fee (per round fee_bps)", deltas[TREASURY.toBase58()] === r.feeLamports, `${deltas[TREASURY.toBase58()] ?? 0} = ${sol(deltas[TREASURY.toBase58()] ?? 0n)}`);
     check("escrow drained exactly the pot", deltas[escrowPk.toBase58()] === -r.pot, String(deltas[escrowPk.toBase58()] ?? 0));
     check(
       "lamports conserved: payout + fee == escrow outflow",

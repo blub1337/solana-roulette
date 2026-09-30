@@ -2,7 +2,7 @@
   "name": "solana-roulette",
   "version": "0.1.0",
   "private": true,
-  "description": "DEVNET-first decentralized Solana roulette with on-chain escrow, weighted entries and 7.5% on-chain fee.",
+  "description": "DEVNET-first decentralized Solana roulette with on-chain escrow, weighted entries and 2% on-chain fee.",
   "license": "UNLICENSED",
   "engines": {
     "node": ">=20"

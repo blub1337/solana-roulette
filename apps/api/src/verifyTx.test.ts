@@ -30,7 +30,7 @@ function roundBytes(): Uint8Array {
   v.setUint32(o, 0, true); o += 4; // participant_count
   buf.writeBigUInt64LE(0n, o); o += 8; // lock_slot
   buf.writeBigUInt64LE(0n, o); o += 8; // reveal_slot
-  v.setUint16(o, 750, true); o += 2; // fee_bps
+  v.setUint16(o, 200, true); o += 2; // fee_bps
   o += 32; // randomness zeros
   o += 16; // winning_ticket zeros
   Buffer.from(PublicKey.default.toBytes()).copy(buf, o); o += 32; // winner

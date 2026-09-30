@@ -42,7 +42,10 @@ fn move_lamports(from: &AccountInfo, to: &AccountInfo, amount: u64) -> Result<()
     Ok(())
 }
 
-declare_id!("AAHBk1qbXCzsbiLe7TiXuZNTvNPVtovtC6NWk9tsi6EZ");
+// The live devnet program (upgraded in place via the operator as upgrade
+// authority). Keep in sync with Anchor.toml, ROULETTE_PROGRAM_ID and
+// NEXT_PUBLIC_ROULETTE_PROGRAM_ID.
+declare_id!("F5kuHXicGCRnnh9SbRvxshynXPyzgzbKK1UVgTg5UZos");
 
 #[program]
 pub mod roulette {
@@ -82,6 +85,32 @@ pub mod roulette {
             100_000_000_000,
         ];
         config.bump = ctx.bumps.config;
+        Ok(())
+    }
+
+    /// Operator-only fee update. Devnet ops tool: the seed-time fee (750) was
+    /// a mistake, and `initialize_config` is one-shot, so the live fee was
+    /// stuck at 0.75% while every doc/UX targeted 2%. Without this instruction
+    /// the only path to the intended fee is a full re-deploy + re-seed, which
+    /// would change the program address and orphan every existing PDA.
+    ///
+    /// Guards: signer must equal the config's stored operator (the same key
+    /// that opens rounds and was the upgrade authority here), the value must
+    /// satisfy the same `<= 3000` cap as `initialize_config`, and the config
+    /// must be initialized. The fee only ever takes effect on future locks:
+    /// `create_round` snapshots `config.fee_bps` into the new Round and
+    /// `lock_round` re-freezes it, so already-open rounds settle at the fee
+    /// they were opened with — no retroactive change, ever.
+    pub fn set_fee(ctx: Context<SetFee>, fee_bps: u16) -> Result<()> {
+        let config = &mut ctx.accounts.config;
+        // (The config PDA is seed-validated and must already exist — Anchor
+        // deserialization fails otherwise — so no separate init check.)
+        require!(
+            ctx.accounts.operator.key() == config.operator,
+            RouletteError::InvalidOperator
+        );
+        require!(fee_bps <= 3000, RouletteError::InvalidFeeBps);
+        config.fee_bps = fee_bps;
         Ok(())
     }
 
@@ -466,6 +495,16 @@ pub mod roulette {
         let _escrow_bump = ctx.bumps.escrow;
         let _round_key = round.key();
 
+        // Full-walk discipline, mirroring pick_winner (C1 follow-up): the list
+        // must be EVERY participant in index order, exactly once, and the
+        // refunded total must equal the pot. Without this a caller could (a)
+        // pass one Participant twice and double-refund it (data is not zeroed
+        // here), or (b) pass a partial/empty list and strand the remaining
+        // deposits behind status=Cancelled with pot=0. Legitimate callers
+        // (operator.ts) send the complete index-sorted list, so this only
+        // rejects malformed refund attempts.
+        let mut refunded: u64 = 0;
+        let mut count: u32 = 0;
         let pairs = ctx.remaining_accounts.chunks(2);
         for pair in pairs {
             if pair.len() != 2 {
@@ -478,6 +517,15 @@ pub mod roulette {
             if data.len() < PARTICIPANT_SPACE {
                 return err!(RouletteError::InvalidParticipant);
             }
+            // Account-identity checks identical to pick_winner's (C1 fix): a
+            // refund must come FROM the program's own Participant account, not
+            // from any 101+-byte blob a caller fabricates. Owner first (a PDA
+            // of another program or an attacker-controlled account never
+            // passes), then the exact Anchor discriminator, then round/wallet.
+            require!(p.owner == &crate::id(), RouletteError::InvalidParticipant);
+            if data[0..8] != participant_discriminator() {
+                return err!(RouletteError::InvalidParticipant);
+            }
             let p_round = Pubkey::try_from(&data[8..40])
                 .map_err(|_| error!(RouletteError::InvalidParticipant))?;
             if p_round != round.key() {
@@ -486,19 +534,32 @@ pub mod roulette {
             let p_wallet = Pubkey::try_from(&data[40..72])
                 .map_err(|_| error!(RouletteError::InvalidParticipant))?;
             let amount = u64::from_le_bytes(data[72..80].try_into().unwrap());
+            let index = u32::from_le_bytes(data[96..100].try_into().unwrap());
             drop(data);
 
+            // Position must match the deposit order: a duplicate participant
+            // repeats its index, an omitted one leaves a gap — both fail.
+            require!(index == count, RouletteError::InvalidParticipant);
             require!(wallet.key() == p_wallet, RouletteError::InvalidParticipant);
-            if amount == 0 {
-                continue;
-            }
+            refunded = refunded
+                .checked_add(amount)
+                .ok_or(RouletteError::ArithmeticOverflow)?;
             // `wallet` is already an &AccountInfo from remaining_accounts.
             move_lamports(
                 &ctx.accounts.escrow.to_account_info(),
                 wallet,
                 amount,
             )?;
+            count = count
+                .checked_add(1)
+                .ok_or(RouletteError::ArithmeticOverflow)?;
         }
+        // The walk must have covered every participant exactly once and moved
+        // exactly the pot: no stranded deposits, no over-refund, no double
+        // refund. (A zero-amount participant cannot exist — deposits are
+        // >= min_deposit > 0 — so sum(amounts) == pot identifies the full set.)
+        require!(count == round.participant_count, RouletteError::InvalidParticipant);
+        require!(refunded == round.pot, RouletteError::InvalidParticipant);
 
         round.status = RoundStatus::Cancelled;
         round.pot = 0;

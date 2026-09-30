@@ -77,7 +77,7 @@ export interface LocalLedgerConfig {
   programId: PublicKey;
   /** Operator identity. In local mode there is no signer; this is bookkeeping. */
   operator: PublicKey;
-  /** Platform fee wallet — receives 7.5% ONLY, never deposits. */
+  /** Platform fee wallet — receives 2% ONLY, never deposits. */
   treasury: PublicKey;
   feeBps: number;
   tierCaps: [bigint, bigint, bigint];
@@ -172,7 +172,7 @@ export class LocalLedger {
   private roundCounter = 0n;
   /** Head round per pool lane (0=1 SOL, 1=10 SOL, 2=100 SOL). */
   readonly headByTier: bigint[] = Array.from({ length: TIER_COUNT }, () => 0n);
-  /** Treasury accrual, in lamports — proves the 7.5% split end to end. */
+  /** Treasury accrual, in lamports — proves the 2% split end to end. */
   treasuryAccrued = 0n;
   /**
    * Lamports each wallet has RECEIVED from rounds (payouts and refunds).

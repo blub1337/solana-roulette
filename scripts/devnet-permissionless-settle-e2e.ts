@@ -168,7 +168,7 @@ async function main() {
   check("stranger is NOT the operator", !stranger.publicKey.equals(configOperator),
     `${stranger.publicKey.toBase58()} != ${configOperator.toBase58()}`);
   check("treasury unchanged", treasuryOnChain.equals(TREASURY), treasuryOnChain.toBase58());
-  check("fee is 750 bps", feeBpsCfg === 750, `${feeBpsCfg}`);
+  check("fee is 200 bps (target config)", feeBpsCfg === 200, `${feeBpsCfg}`);
   check("program id unchanged", PROGRAM.toBase58() === "F5kuHXicGCRnnh9SbRvxshynXPyzgzbKK1UVgTg5UZos");
 
   // Fund the stranger: it needs SOL ONLY for transaction fees.
@@ -254,7 +254,7 @@ async function main() {
     `lock_slot=${round!.lockSlot} (slot read before send: ${slotAtLock})`);
   check("reveal_slot = lock_slot + 32", round!.revealSlot === round!.lockSlot + 32n,
     `${round!.lockSlot} -> ${round!.revealSlot}`);
-  check("fee frozen at 750 bps", round!.feeBps === 750, `${round!.feeBps}`);
+  check("fee frozen at 200 bps", round!.feeBps === 200, `${round!.feeBps}`);
 
   // ---- stage 4: forged-sysvar attack must be rejected --------------------
   console.log(`\n── stage 4: forged SlotHashes must be REJECTED (security pin) ──`);
@@ -351,15 +351,15 @@ async function main() {
   round = await readRound(roundId);
 
   check("pay succeeded WITHOUT the operator key", round!.status === 5, `status=${STATUS[round!.status]} ${explorer(paySig)}`);
-  check("winner received exactly 92.5%", BigInt(winnerAfter - winnerBefore) === round!.payout,
+  check("winner received exactly 98%", BigInt(winnerAfter - winnerBefore) === round!.payout,
     `+${winnerAfter - winnerBefore} (expected +${round!.payout})`);
-  check("treasury received exactly 7.5%", BigInt(treasuryAfter - treasuryBefore) === round!.fee,
+  check("treasury received exactly 2%", BigInt(treasuryAfter - treasuryBefore) === round!.fee,
     `+${treasuryAfter - treasuryBefore} (expected +${round!.fee})`);
   check("escrow reduced to rent floor", escrowAfterPay === 650_240, `${escrowBeforePay} -> ${escrowAfterPay}`);
   check("no funds created or lost",
     BigInt(winnerAfter - winnerBefore) + BigInt(treasuryAfter - treasuryBefore) === BigInt(escrowBeforePay - escrowAfterPay),
     `${winnerAfter - winnerBefore} + ${treasuryAfter - treasuryBefore} == ${escrowBeforePay - escrowAfterPay}`);
-  check("92.5% / 7.5% split exact", round!.payout * 100n === round!.pot * 925n / 10n && round!.fee * 100n === round!.pot * 75n / 10n,
+  check("98% / 2% split exact", round!.payout * 10000n === round!.pot * 9800n && round!.fee * 10000n === round!.pot * 200n,
     `${round!.payout} / ${round!.fee} of ${round!.pot}`);
 
   // ---- stage 7: the operator is genuinely unnecessary -------------------

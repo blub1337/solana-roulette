@@ -76,7 +76,7 @@ const problems = [];
 if (o !== d.length) problems.push(`layout consumed ${o} of ${d.length} bytes`);
 if (!acc.owner.equals(PROGRAM_ID)) problems.push("round is not owned by the program");
 if (d[9] !== 0) problems.push(`status is ${d[9]}, expected 0 (Open)`);
-if (d.readUInt16LE(93) !== 750) problems.push(`fee_bps is ${d.readUInt16LE(93)}, expected 750`);
+if (d.readUInt16LE(93) !== 200) problems.push(`fee_bps is ${d.readUInt16LE(93)}, expected 200`);
 if (!escrowAcc) problems.push("escrow PDA was not created");
 
 if (problems.length) {

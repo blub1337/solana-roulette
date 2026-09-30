@@ -10,6 +10,7 @@
  * never active in production, where Next.js is the server and no proxy runs.
  */
 import type { FastifyInstance } from "fastify";
+import net from "node:net";
 
 /** Headers that must not be forwarded verbatim in either direction. */const HOP_BY_HOP = new Set([ 
   "host",
@@ -29,12 +30,12 @@ import type { FastifyInstance } from "fastify";
 /** Shown while the Next.js dev server is still starting or compiling. */
 const UI_WARMING_HTML = `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"/>
-<title>Solana Roulette — starting…</title>
+<title>SolRoll — starting…</title>
 <meta http-equiv="refresh" content="2"/>
 <style>body{background:#0b0f0a;color:#e8e3d3;font:16px/1.6 system-ui,sans-serif;
 display:grid;place-items:center;height:100vh;margin:0}div{text-align:center;max-width:32rem}
 code{color:#f5c451}</style></head>
-<body><div><h1>Solana Roulette is starting</h1>
+<body><div><h1>SolRoll is starting</h1>
 <p>The API is up; the web UI is still compiling. This page reloads automatically.</p>
 <p>API health: <code>/api/health</code></p></div></body></html>`;
 
@@ -59,6 +60,36 @@ function filterResponseHeaders(headers: Headers): Record<string, string> {
 
 export function registerPreviewProxy(app: FastifyInstance, uiUrl: string): void {
   const base = uiUrl.replace(/\/+$/, "");
+
+  // Dev-only WebSocket upgrade pass-through. The HTTP fetch proxy above cannot
+  // carry an Upgrade handshake, so Next.js HMR (/_next/webpack-hmr) would 404
+  // on every page load through the public origin. Raw-pipe those sockets to
+  // the UI process instead. Never active in production (no proxy registered).
+  app.server.on("upgrade", (req, socket, head) => {
+    const url = req.url ?? "";
+    if (!url.startsWith("/_next/webpack-hmr")) return; // leave anything else to Node
+    const target = new URL(base);
+    const upstream = net.connect(Number(target.port), target.hostname, () => {
+      // Rewrite the request line + Host; forward the WS handshake headers as-is.
+      const forwarded = Object.entries(req.headers)
+        .filter(([k]) => !"host upgrade connection".split(" ").includes(k.toLowerCase()))
+        .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(", ") : v}`);
+      const head_ = [
+        `${req.method ?? "GET"} ${url} HTTP/1.1`,
+        `Host: ${target.host}`,
+        ...forwarded,
+        "Connection: Upgrade",
+        `Upgrade: ${req.headers.upgrade ?? "websocket"}`,
+        "\r\n",
+      ].join("\r\n");
+      upstream.write(head_);
+      if (head && head.length > 0) upstream.write(head);
+      upstream.pipe(socket);
+      socket.pipe(upstream);
+    });
+    upstream.on("error", () => socket.destroy());
+    socket.on("error", () => upstream.destroy());
+  });
 
   // OPTIONS is deliberately excluded: @fastify/cors already owns the wildcard
   // OPTIONS route, and registering it twice makes the router throw.

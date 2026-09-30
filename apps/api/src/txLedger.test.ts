@@ -207,3 +207,156 @@ describe("backoff + queues", () => {
     expect(ledger.listStalePending(0).map((t) => t.id)).toEqual([a.id]);
   });
 });
+
+/**
+ * Restart safety.
+ *
+ * The ledger is in memory and the audit mirror is write-through, so the guards
+ * only survive a restart if the mirror is read back. Without that, a fresh
+ * process has no memory of which deposits are CONFIRMED, which signatures are
+ * spent and which rounds are already paid — exactly the state in which the same
+ * on-chain transfer can be handed to the API a second time.
+ */
+describe("restore from the audit mirror", () => {
+  /** The shape a mirror row comes back in. */
+  function mirrored(
+    over: Partial<Parameters<TxLedger["restore"]>[0][number]> = {}
+  ): Parameters<TxLedger["restore"]>[0][number] {
+    const now = new Date();
+    return {
+      id: "restored-1",
+      idempotencyKey: depositKey("1", WALLET),
+      kind: "DEPOSIT",
+      roundId: "1",
+      tier: 0,
+      wallet: WALLET,
+      recipient: ESCROW,
+      network: "devnet",
+      depositAmountLamports: "1000",
+      depositSignature: SIG_A,
+      depositStatus: "CONFIRMED",
+      payoutAmountLamports: null,
+      payoutSignature: null,
+      payoutStatus: null,
+      feeLamports: null,
+      attempts: 1,
+      lastError: null,
+      createdAt: now,
+      updatedAt: now,
+      confirmedAt: now,
+      nextRetryAt: null,
+      ...over,
+    };
+  }
+
+  it("brings back the confirmed-deposit gate, the spent signature and the paid-round guard", () => {
+    const ledger = new TxLedger();
+    const restored = ledger.restore([
+      mirrored(),
+      mirrored({
+        id: "restored-2",
+        idempotencyKey: payoutKey("1", 1),
+        kind: "PAYOUT",
+        wallet: WINNER,
+        recipient: WINNER,
+        depositAmountLamports: null,
+        depositSignature: SIG_B,
+        depositStatus: null,
+        payoutAmountLamports: "980",
+        payoutSignature: SIG_B,
+        payoutStatus: "CONFIRMED",
+        feeLamports: "20",
+      }),
+    ]);
+    expect(restored).toBe(2);
+
+    // The wallet is already in the round — a restart must not forget that.
+    expect(ledger.getConfirmedDeposit("1", WALLET)?.depositSignature).toBe(SIG_A);
+    expect(ledger.confirmedPotLamports("1")).toBe(1000n);
+    // The round is already paid.
+    expect(ledger.getConfirmedPayout("1")?.depositSignature).toBe(SIG_B);
+    // A repeat intent resumes the restored record instead of opening a new one.
+    expect(ledger.begin({ ...depositInput("1", WALLET) }).created).toBe(false);
+  });
+
+  it("refuses to re-bind a signature that a live record already owns", () => {
+    const ledger = new TxLedger();
+    const live = deposit(ledger, "1", WALLET).tx;
+    ledger.settle(live.id, "CONFIRMED", { signature: SIG_A });
+
+    // A stale mirror row claiming the same signature for another record must
+    // not steal the binding from the record that is live right now.
+    const restored = ledger.restore([mirrored({ id: "ghost", idempotencyKey: depositKey("9", WINNER), wallet: WINNER })]);
+    expect(restored).toBe(0);
+    expect(ledger.bySignature(SIG_A)?.id).toBe(live.id);
+  });
+
+  it("never overwrites a record that is already in memory", () => {
+    const ledger = new TxLedger();
+    const live = deposit(ledger, "1", WALLET).tx;
+    const restored = ledger.restore([mirrored({ id: live.id, depositStatus: "PENDING", depositSignature: null })]);
+    expect(restored).toBe(0);
+    expect(ledger.get(live.id)?.depositStatus).toBe("PENDING");
+  });
+
+  it("ignores rows without an id or a key", () => {
+    const ledger = new TxLedger();
+    expect(ledger.restore([mirrored({ id: "" }), mirrored({ id: "x", idempotencyKey: "" })])).toBe(0);
+    expect(ledger.listRecent()).toHaveLength(0);
+  });
+});
+
+/**
+ * A cancel or the expiry reaper can mark a deposit FAILED while a confirmation
+ * is still reading the chain. If the transfer then turns out to be real, the
+ * record has to say CONFIRMED: the pot contains the lamports and the payout is
+ * computed from CONFIRMED deposits only, so a FAILED row would pay the winner
+ * short and leave the difference unexplained in the escrow.
+ */
+describe("confirm a deposit that was failed while in flight", () => {
+  it("moves FAILED → CONFIRMED and puts the deposit back into the pot", () => {
+    const ledger = new TxLedger();
+    const { tx } = deposit(ledger, "1", WALLET, "1000");
+    ledger.failPending(tx.id, "rejected: the player closed the wallet");
+
+    const revived = ledger.confirmProvenArrival(tx.id, { signature: SIG_A });
+    expect(revived.depositStatus).toBe("CONFIRMED");
+    expect(revived.depositSignature).toBe(SIG_A);
+    expect(revived.lastError).toBeNull();
+    expect(ledger.confirmedPotLamports("1")).toBe(1000n);
+    expect(ledger.getConfirmedDeposit("1", WALLET)?.id).toBe(tx.id);
+  });
+
+  it("is a no-op when the record is already CONFIRMED, and never changes the signature", () => {
+    const ledger = new TxLedger();
+    const { tx } = deposit(ledger, "1", WALLET);
+    ledger.settle(tx.id, "CONFIRMED", { signature: SIG_A });
+    expect(ledger.confirmProvenArrival(tx.id, { signature: SIG_A }).depositStatus).toBe("CONFIRMED");
+    expect(() => ledger.confirmProvenArrival(tx.id, { signature: SIG_B })).toThrow(/signature_conflict|already confirmed/);
+    expect(ledger.get(tx.id)?.depositSignature).toBe(SIG_A);
+  });
+
+  it("refuses to steal a signature that another record already owns", () => {
+    const ledger = new TxLedger();
+    const first = deposit(ledger, "1", WALLET).tx;
+    ledger.settle(first.id, "CONFIRMED", { signature: SIG_A });
+    const other = deposit(ledger, "1", WINNER).tx;
+    ledger.failPending(other.id, "rejected");
+
+    expect(() => ledger.confirmProvenArrival(other.id, { signature: SIG_A })).toThrow(/already recorded/);
+    expect(ledger.get(other.id)?.depositStatus).toBe("FAILED");
+  });
+});
+
+function depositInput(roundId: string, wallet: string) {
+  return {
+    kind: "DEPOSIT" as const,
+    idempotencyKey: depositKey(roundId, wallet),
+    roundId,
+    tier: 0,
+    wallet,
+    recipient: ESCROW,
+    network: "devnet",
+    depositAmountLamports: "1000",
+  };
+}

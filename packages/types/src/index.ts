@@ -1,5 +1,5 @@
 /**
- * Shared domain types for Solana Roulette.
+ * Shared domain types for SolRoll.
  * Lamports are ALWAYS strings over the wire (no JS number precision loss).
  */
 
@@ -56,9 +56,9 @@ export interface TierMeta {
 }
 
 export const TIER_META: readonly TierMeta[] = [
-  { label: "1 SOL Roulette", shortLabel: "1 SOL", emoji: "🟢", accent: "emerald", capSol: 1 },
-  { label: "10 SOL Roulette", shortLabel: "10 SOL", emoji: "🔵", accent: "sky", capSol: 10 },
-  { label: "100 SOL Roulette", shortLabel: "100 SOL", emoji: "🟣", accent: "violet", capSol: 100 },
+  { label: "1 SOL Roll", shortLabel: "1 SOL", emoji: "🟢", accent: "emerald", capSol: 1 },
+  { label: "10 SOL Roll", shortLabel: "10 SOL", emoji: "🔵", accent: "sky", capSol: 10 },
+  { label: "100 SOL Roll", shortLabel: "100 SOL", emoji: "🟣", accent: "violet", capSol: 100 },
 ];
 
 /** Parse a "?tier=" query param into a lane index (null when invalid). */

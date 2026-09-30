@@ -27,7 +27,7 @@ User wallet ──deposit(SOL)──► Round escrow PDA (program-owned)
                                      │  settle (program computes winner + splits)
                      ┌───────────────┴───────────────┐
                      ▼                               ▼
-                 Winner (92.5%)                 Treasury (7.5%)
+                 Winner (98%)                 Treasury (2%)
 ```
 
 ## 2. Components
@@ -67,7 +67,7 @@ simulation is never presented as real money. See `PAYMENTS.md` §2.1.
 
 All balances are **lamports**. See `SMART_CONTRACT.md` for full layout.
 
-- `GlobalConfig` — operator, treasury, fee_bps=750, max_round_size, min/max deposit.
+- `GlobalConfig` — operator, treasury, fee_bps=200, max_round_size, min/max deposit.
 - `Round` — state, pot, weight sum, fee/payout snapshot at lock, lock/reveal slots, randomness, winner.
 - `Participant` PDA `(round, wallet)` — amount, cumulative weight start, creation index.
 - Round escrow PDA — program-owned lamport vault for the round.

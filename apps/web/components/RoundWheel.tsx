@@ -15,8 +15,7 @@ export interface RoundWheelProps {
   tier: number;
 }
 
-const HUES = [152, 199, 262]; // emerald / sky / violet per tier
-const LABELS = ["SOL", "SOL", "SOL"] as const;
+const HUES = [172, 199, 45]; // teal / sky / gold per tier (matches logo palette)
 
 /**
  * Displays the entry pool as a proportionally-sized segmented disc in the
@@ -51,7 +50,6 @@ export function RoundWheel({ entries, winner, spinning, tier }: RoundWheelProps)
       >
         {segments.length === 0 ? (
           <div className="flex h-full w-full flex-col items-center justify-center gap-1 text-ivory/40">
-            <span className="font-display text-lg text-gold-500/60">{LABELS[tier] ?? "SOL"}</span>
             <span className="text-xs uppercase tracking-widest">empty pot</span>
           </div>
         ) : (

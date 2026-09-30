@@ -9,6 +9,7 @@
  * programs/roulette/src/state.rs field-for-field:
  *
  *   InitializeConfig: [config(w), operator(s,w), treasury(w), system]
+ *   SetFee:           [config(w), operator(s,w), system]
  *   CreateRound:      [config(w), round(w), escrow, operator(s,w), system]
  *   Deposit:          [config, round(w), participant(w), escrow(w), depositor(s,w), system]
  *   LockRound:        [config, round(w), escrow, operator(s,w)]
@@ -132,6 +133,26 @@ export function depositIx(
       meta(escrowPda(programId, round), false, true),
       meta(depositor, true, true),
       meta(SystemProgram.programId),
+    ],
+    data,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// set_fee(fee_bps: u16) — OPERATOR-ONLY. Added by the in-place program upgrade
+// (750 -> 200 bps correction): `initialize_config` is one-shot, so without this
+// instruction the live fee could never be corrected without abandoning the
+// program address and every PDA. Caps and operator checks live in the program.
+// ---------------------------------------------------------------------------
+
+export function setFeeIx(programId: PublicKey, operator: PublicKey, feeBps: number): TransactionInstruction {
+  const data = Buffer.concat([globalDiscriminator("set_fee"), u16(feeBps)]);
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      meta(configPda(programId), false, true),
+      meta(operator, true, true),
+      meta(SystemProgram.programId, false, false),
     ],
     data,
   });

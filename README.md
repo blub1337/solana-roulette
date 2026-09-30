@@ -2,7 +2,7 @@
 
 A decentralized roulette on Solana: deposits go into a **program-owned escrow PDA**,
 every participant's weight equals their deposit, and the winner is selected
-**deterministically on-chain** from a committed future blockhash. The 92.5% / 7.5%
+**deterministically on-chain** from a committed future blockhash. The 98% / 2%
 winner/treasury split is enforced by the program, not the frontend.
 
 > **DEVNET ONLY by default.** Mainnet requires `SOLANA_NETWORK=mainnet-beta` **and**
@@ -59,7 +59,7 @@ volume per round (`TIER_CAPS_SOL`, enforced on-chain, never in the frontend).
    `randomness = SHA256(b"roulette:reveal" ‖ round_id ‖ blockhash)`, computes
    `ticket = u128(randomness[0..16]) % total_weight`, and walks cumulative
    ranges to pick the winner (`settle_round`, winner + amounts frozen).
-5. `pay_winners` pays 92.5% to the winner and 7.5% to the platform fee wallet
+5. `pay_winners` pays 98% to the winner and 2% to the platform fee wallet
    **atomically**, then marks the round COMPLETED and the next round opens
    automatically. No admin action, no AI, no manual payout.
 6. Anyone can re-verify the winner from public chain data
@@ -111,7 +111,7 @@ node scripts/generate-operator-keypair.mjs   # prints JSON array; DEVNET ONLY
 ## Admin console
 
 `/admin` (token: `ADMIN_TOKEN`) shows devnet/mainnet status, RPC health, the
-escrow / operator / fee addresses, the live escrow balance, the 7.5% fee and the
+escrow / operator / fee addresses, the live escrow balance, the 2% fee and the
 1/10/100 SOL caps, open and completed rounds, the deposit & payout ledger and the
 transaction log — plus one switch: **Deposits Active / Paused**.
 

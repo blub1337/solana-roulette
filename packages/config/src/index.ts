@@ -10,7 +10,7 @@
 export type Network = "devnet" | "mainnet-beta";
 
 /**
- * Platform fee wallet — the operator's public address (receives 7.5% ONLY).
+ * Platform fee wallet — the operator's public address (receives 2% ONLY).
  * Established product constant (public key, not a secret). Deposits NEVER go
  * here — they go into the round escrow PDA. docs/PAYMENTS.md §2.
  */
@@ -45,7 +45,7 @@ export interface AppConfig {
   adminToken?: string;
   /** Boot default of the deposit kill switch (DEPOSITS_PAUSED=true). */
   depositsPaused: boolean;
-  /** Platform fee wallet — public key ONLY, receives the 7.5% commission. */
+  /** Platform fee wallet — public key ONLY, receives the 2% commission. */
   platformFeeWallet?: string;
   treasuryPubkey?: string;
   /**
@@ -56,8 +56,12 @@ export interface AppConfig {
   depositEscrowWallet?: string;
   platformFeeBps: number;
   feeBps: number;
-  /** Fee recipient fallback when PLATFORM_FEE_WALLET is unset. */
-  poolTargetSol: number | null;
+  /**
+   * Fee recipient fallback when PLATFORM_FEE_WALLET is unset.
+   * POOL_TARGET_SOL parsed to EXACT lamports (decimal string → bigint, no
+   * float drift); null when unset.
+   */
+  poolTargetLamports: bigint | null;
   maxRoundSizeLamports: bigint;
   minDepositLamports: bigint;
   maxDepositLamports: bigint;
@@ -70,6 +74,15 @@ export interface AppConfig {
 
 export const TIER_COUNT = 3;
 const BPS_DENOMINATOR = 10_000;
+
+/**
+ * Global per-round volume ceiling. Must stay ≥ the largest tier cap so every
+ * lane can actually fill: the program's deposit requires pot ≤ max_round_size
+ * for EVERY deposit, while auto-close fires only at pot == tier_cap — a
+ * smaller ceiling makes the big lane permanently unsettled (see the boot
+ * guard in resolveConfig). Defaults to the 100-SOL top lane.
+ */
+const DEFAULT_MAX_ROUND_SIZE_LAMPORTS = 100_000_000_000n;
 
 /** Parse an integer lamport env value; accepts "10_000_000_000" underscores. */
 function parseLamportsEnv(name: string, raw: string | undefined, fallback: bigint): bigint {
@@ -110,14 +123,6 @@ function parseTierCaps(raw: string | undefined): [bigint, bigint, bigint] {
   return [caps[0]!, caps[1]!, caps[2]!];
 }
 
-function parseOptionalNumber(name: string, raw: string | undefined): number | null {
-  if (raw === undefined || raw.trim() === "") return null;
-  const v = Number(raw);
-  if (!Number.isFinite(v) || v <= 0) {
-    throw new Error(`${name} must be a positive number, got "${raw}"`);
-  }
-  return v;
-}
 
 /**
  * Resolve the full app config. Throws MainnetDisabledError when mainnet is
@@ -134,23 +139,55 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     throw new MainnetDisabledError();
   }
 
+  // Default platform commission: 200 bps (2%). This default must match the
+  // rate seeded on-chain at initialize_config and documented in README/docs —
+  // the effective number is still resolved at runtime by feeTerms.ts (chain
+  // mode reads GlobalConfig; local mode uses this value), so the three can
+  // never quietly diverge in what players are charged.
   const platformFeeBps = parseLamportsEnv(
     "PLATFORM_FEE_BPS",
     env.PLATFORM_FEE_BPS,
-    750n,
+    200n,
   );
   const feeBps = Number(platformFeeBps);
   if (feeBps < 0 || feeBps > BPS_DENOMINATOR) {
     throw new Error(`PLATFORM_FEE_BPS must be within 0..${BPS_DENOMINATOR}`);
   }
 
-  const poolTargetSol = parseOptionalNumber("POOL_TARGET_SOL", env.POOL_TARGET_SOL);
+  // POOL_TARGET_SOL is parsed with the same exact decimal math as the other
+  // SOL values: `Number(v) * 1_000_000_000` can drift ±1 lamport for some
+  // 9-decimal inputs, and every pool number must be reproducible.
+  let poolTargetLamports: bigint | null = null;
+  if (env.POOL_TARGET_SOL !== undefined && env.POOL_TARGET_SOL.trim() !== "") {
+    poolTargetLamports = solStringToLamports("POOL_TARGET_SOL", env.POOL_TARGET_SOL);
+  }
+
+  const maxRoundSizeLamports = parseLamportsEnv(
+    "MAX_ROUND_SIZE_LAMPORTS",
+    env.MAX_ROUND_SIZE_LAMPORTS,
+    DEFAULT_MAX_ROUND_SIZE_LAMPORTS
+  );
+  const tierCapsLamports = parseTierCaps(env.TIER_CAPS_SOL);
+
+  // Invariant the on-chain program relies on (deposit: new_pot must satisfy
+  // BOTH pot ≤ tier_cap AND pot ≤ max_round_size; auto-close fires only at
+  // pot == tier_cap): a tier cap above the global round-size ceiling makes
+  // that lane unfillable — it can never reach its cap, never auto-close and
+  // never settle, silently stranding depositors. Fail at boot, not at fill.
+  const maxTierCap = tierCapsLamports.reduce((m, c) => (c > m ? c : m), 0n);
+  if (maxTierCap > maxRoundSizeLamports) {
+    throw new Error(
+      `MAX_ROUND_SIZE_LAMPORTS (${maxRoundSizeLamports}) is below the largest ` +
+        `TIER_CAPS_SOL entry (${maxTierCap}); that lane could never fill or ` +
+        `settle. Raise MAX_ROUND_SIZE_LAMPORTS to at least ${maxTierCap}.`
+    );
+  }
 
   return {
     network,
     mainnetEnabled,
     rpcUrl: env.SOLANA_RPC_URL || "https://api.devnet.solana.com",
-    programId: env.ROULETTE_PROGRAM_ID || "AAHBk1qbXCzsbiLe7TiXuZNTvNPVtovtC6NWk9tsi6EZ",
+    programId: env.ROULETTE_PROGRAM_ID || "F5kuHXicGCRnnh9SbRvxshynXPyzgzbKK1UVgTg5UZos",
     operatorKeypairJson: env.OPERATOR_KEYPAIR || undefined,
     adminToken: env.ADMIN_TOKEN?.trim() || undefined,
     depositsPaused: env.DEPOSITS_PAUSED === "true",
@@ -159,18 +196,14 @@ export function resolveConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     depositEscrowWallet: env.DEPOSIT_ESCROW_WALLET || undefined,
     platformFeeBps: feeBps,
     feeBps,
-    poolTargetSol,
-    maxRoundSizeLamports: parseLamportsEnv(
-      "MAX_ROUND_SIZE_LAMPORTS",
-      env.MAX_ROUND_SIZE_LAMPORTS,
-      10_000_000_000n
-    ),
+    poolTargetLamports,
+    maxRoundSizeLamports,
     minDepositLamports: parseLamportsEnv("MIN_DEPOSIT_LAMPORTS", env.MIN_DEPOSIT_LAMPORTS, 10_000_000n),
     maxDepositLamports: parseLamportsEnv("MAX_DEPOSIT_LAMPORTS", env.MAX_DEPOSIT_LAMPORTS, 1_000_000_000n),
     revealOffsetSlots: Number(
       parseLamportsEnv("REVEAL_OFFSET_SLOTS", env.REVEAL_OFFSET_SLOTS, 32n)
     ),
-    tierCapsLamports: parseTierCaps(env.TIER_CAPS_SOL),
+    tierCapsLamports,
     settlementPollMs: Number(parseLamportsEnv("SETTLEMENT_POLL_MS", env.SETTLEMENT_POLL_MS, 5_000n)),
     logLevel: env.LOG_LEVEL || "info",
   };

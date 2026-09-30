@@ -61,7 +61,7 @@ The verifier independently:
 
 ```json
 { "type": "deposit", "roundId": "1", "wallet": "...", "amount": "100000000", "pot": "1050000000", "participantCount": 3 }
-{ "type": "winner",  "roundId": "1", "winner": "...", "payoutLamports": "9250000000" }
+{ "type": "winner",  "roundId": "1", "winner": "...", "payoutLamports": "9800000000" }
 ```
 
 Clients auto-reconnect (`EventSource` built-in). Sequence: on round full → `round_full`,
@@ -72,7 +72,7 @@ then `lock`, `randomness_arrived` (reveal slot reached), `winner` + `settlement`
 A loop inside apps/api advances each pool lane one state-machine step per tick:
 `FULL` → `lock_round` (freezes `fee_bps`, commits the reveal slot); once
 `slot >= reveal_slot` → `settle_round` (freezes randomness, winner, fee, payout);
-then `pay_winners` (92.5% + 7.5%, flips to `COMPLETED`); then the next round is
+then `pay_winners` (98% + 2%, flips to `COMPLETED`); then the next round is
 created from the shared counter. The chain runtime requires `OPERATOR_KEYPAIR`.
 
 ## Idempotency

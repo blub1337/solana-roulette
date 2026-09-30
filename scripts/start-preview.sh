@@ -23,6 +23,16 @@ pkill -f "next dev" 2>/dev/null || true
 pkill -f "next-server" 2>/dev/null || true
 sleep 1
 
+# A production `next build` (e.g. from a hosting-style verification run) leaves
+# BUILD_ID and prod manifests inside apps/web/.next. Those artifacts are
+# incompatible with `next dev`: the dev server serves HTML from memory but
+# 404s its compiled CSS/JS assets — the page renders unstyled. Remove any
+# stale production build so the dev server rebuilds its own cache.
+if [ -f apps/web/.next/BUILD_ID ]; then
+  rm -rf apps/web/.next
+  echo "preview: removed stale production apps/web/.next (dev server needs its own cache)"
+fi
+
 echo "preview: public 0.0.0.0:$PORT_PUBLIC (api + ui proxy), ui internal :$PORT_UI"
 
 # 1. Public port first: API routes plus a reverse proxy to the UI.

@@ -53,7 +53,7 @@ const ENV_KEY = "OPERATOR_KEYPAIR";
 const PUBLIC_VARS = {
   DEPOSIT_ESCROW_WALLET: "", // filled with the operator address
   PLATFORM_FEE_WALLET: "6B9MXLX4tgbHB9eXheHqK6FmPXCwxYP7No51NqRQHAaR",
-  PLATFORM_FEE_BPS: "750",
+  PLATFORM_FEE_BPS: "200",
   TIER_CAPS_SOL: "1,10,100",
   DEPOSITS_PAUSED: "false",
   SOLANA_NETWORK: "devnet",
@@ -182,7 +182,7 @@ async function resolveCredentials() {
 
 function stage(secret, address) {
   const header = [
-    "# Render env vars for the API service — Solana Roulette (DEVNET)",
+    "# Render env vars for the API service — SolRoll (DEVNET)",
     `# Escrow / operator / payout address: ${address}`,
     "#",
     "# Copy line 7 into Render: Service → Environment → Add from .env",

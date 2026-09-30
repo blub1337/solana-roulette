@@ -39,22 +39,57 @@ See `.env.example`. Critical ones:
 | `OPERATOR_KEYPAIR` | Devnet operator keypair JSON array (server-side only) |
 | `ADMIN_TOKEN` | Bearer token for the operator console at `/admin`; unset ⇒ the admin API is closed (403) |
 | `DEPOSITS_PAUSED` | Boot default of the deposit kill switch (`true` keeps deposits off across restarts) |
-| `PLATFORM_FEE_WALLET` | Platform fee wallet (public address only; receives 7.5%) |
-| `PLATFORM_FEE_BPS` | `750` (7.5%); also frozen on-chain at round lock |
+| `PLATFORM_FEE_WALLET` | Platform fee wallet (public address only; receives 2%) |
+| `PLATFORM_FEE_BPS` | `200` (2%); also frozen on-chain at round lock |
 | `POOL_TARGET_SOL` | Pool size (SOL) that triggers lock/settlement |
 | `TREASURY_PUBKEY` | On-chain treasury written at `initialize_config` (fee recipient) |
 | `ENABLE_MAINNET` | Must be literally `true` to unlock mainnet; never set in prod by default |
 
-## 5. On-chain deploy (requires Rust/Anchor toolchain — CI or local)
+## 5. On-chain deploy / upgrade (SBF toolchain required)
+
+Build (works in this workspace — solana-agave 4.x CLI + cargo-build-sbf):
 
 ```bash
-anchor build                       # produces deployable .so
-anchor deploy --provider.cluster devnet
-anchor run seed-config             # initialize_config on devnet
+cd programs/roulette
+cargo build-sbf --sbf-out-dir ../../target/deploy   # -> target/deploy/roulette.so
 ```
 
-Program deploy is **not** possible inside this sandbox (no Rust toolchain); CI
-(`.github/workflows/ci.yml`) builds and tests the program on every push.
+Two deployment modes:
+
+* **Fresh deploy** = new program address (orphans every existing PDA). Only for
+  a clean start; the deterministic keypair flow lives in
+  `.github/workflows/deploy-devnet.yml`. `declare_id!`, Anchor.toml and
+  `ROULETTE_PROGRAM_ID` must all carry the same address.
+* **In-place upgrade** (preferred) keeps the program address and all config /
+  round / participant PDAs. Requires the wallet named as the program's upgrade
+  authority (here: the operator keypair):
+
+```bash
+solana program deploy target/deploy/roulette.so \
+  --url devnet --keypair operator-devnet.key.json \
+  --upgrade-authority operator-devnet.key.json \
+  --program-id F5kuHXicGCRnnh9SbRvxshynXPyzgzbKK1UVgTg5UZos
+```
+
+### 5.1 Fee correction 750 → 200 bps (2026-09-30, done as an in-place upgrade)
+
+The seed-time fee (750) could not be corrected before: `initialize_config` is
+one-shot and the program had no fee-update instruction. Resolution:
+
+1. Added `set_fee(fee_bps)` — operator-only (`signer == config.operator`),
+   same `<= 3000` cap as init, effective from the NEXT round's fee snapshot
+   (`create_round`/`lock_round` freeze it), never retroactive.
+2. Upgraded the program in place (same address, PDAs intact).
+3. `node scripts/set-fee-devnet.mjs 200` — sends the instruction and verifies
+   `config.fee_bps` on-chain (tx `5Ptmfgz74Ak43mxibTrA8gVY9HrvW5DM3JgzBbsN945dWiUKKA8ksz3KeA19ptaeAvdE7maWzWQSVg52pDbpdeiu`).
+4. End-to-end proof (round 81, real devnet SOL): deposits 400M+300M+300M →
+   lock froze `fee_bps 200` → settle/paid **980,000,000** to the winner and
+   **20,000,000** to the treasury (= exactly 2% of the 1 SOL pot); escrow
+   drained to rent-exemption; status COMPLETED
+   (pay tx `GbKR593P1U1KBt5k2bdpfjLwjPgbtXSVwebzdGkUwrvPCA2BxzyUKnFCD1pRjmSRWbrbT21dzvrgXQQyEwWynrB`).
+5. Tooling: SDK `setFeeIx` (packages/sdk), `scripts/set-fee-devnet.mjs`,
+   `scripts/set-render-fee.mjs` (per-variable Render env update; the list-PUT
+   endpoint would REPLACE every variable and is therefore never used).
 
 ## 6. Docker
 
@@ -63,8 +98,10 @@ Program deploy is **not** possible inside this sandbox (no Rust toolchain); CI
 ## 7. Operator keypair (devnet only)
 
 Generate once: `solana-keygen new -o operator-devnet.json --no-bip39-phrase`.
-Export JSON array as `OPERATOR_KEYPAIR`. Airdrop devnet SOL for fees. Rotate by
-re-initializing nothing — operator change is via program instruction `set_operator`.
+Export JSON array as `OPERATOR_KEYPAIR`. Airdrop devnet SOL for fees. Rotation
+is NOT currently possible on-chain: the operator is stored in GlobalConfig and
+no `set_operator` instruction exists — rotating would require another program
+upgrade (or a config re-init on a fresh deploy).
 
 ## 8. Mainnet gate (deliberate, manual)
 

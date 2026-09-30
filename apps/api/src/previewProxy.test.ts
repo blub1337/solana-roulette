@@ -46,7 +46,7 @@ describe("preview proxy", () => {
     expect(res.headers["content-type"]).toContain("text/html");
     // The page tells the browser to come back on its own.
     expect(res.body).toContain("http-equiv=\"refresh\"");
-    expect(res.body).toContain("Solana Roulette is starting");
+    expect(res.body).toContain("SolRoll is starting");
   });
 
   it("returns 503 (not a page) for writes while the UI is down", async () => {

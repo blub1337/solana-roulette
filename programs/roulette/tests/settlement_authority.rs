@@ -144,6 +144,56 @@ fn cancel_round_stays_operator_gated() {
 }
 
 // ---------------------------------------------------------------------------
+// cancel_round full-walk discipline (C1 follow-up)
+// ---------------------------------------------------------------------------
+
+/// Regression guard for the cancel refund loop: without a completeness check a
+/// caller could pass one Participant TWICE (double refund — the account data
+/// is never zeroed on cancel) or a partial/empty list (remaining deposits are
+/// stranded behind status=Cancelled with pot=0). The loop must therefore walk
+/// participants in index order (index == count), require the full participant
+/// count, and require the refunded total to equal the pot — the same
+/// discipline pick_winner applies to the settle walk.
+#[test]
+fn cancel_round_enforces_complete_unique_refund_walk() {
+    let lib = read_src("lib.rs");
+    let handler = fn_body(&lib, "cancel_round");
+
+    // Position fidelity: a duplicate repeats its index, an omission leaves a
+    // gap — both must fail.
+    assert!(
+        handler.contains("require!(index == count"),
+        "cancel_round must reject out-of-order/duplicate participant entries \
+         (index == count), exactly like pick_winner"
+    );
+    // Full coverage: every participant must be present.
+    assert!(
+        handler.contains("count == round.participant_count"),
+        "cancel_round must require the walk to cover round.participant_count \
+         participants — a partial list would strand the missing deposits \
+         behind status=Cancelled with pot=0"
+    );
+    // Accounting tie: refunds must sum to exactly the pot.
+    assert!(
+        handler.contains("refunded == round.pot"),
+        "cancel_round must require refunded == round.pot — otherwise a malformed \
+         list could over- or under-refund relative to the recorded pot"
+    );
+    // Checked accumulation of the refunded total.
+    assert!(
+        handler.contains("refunded = refunded"),
+        "cancel_round must accumulate the refunded total with checked_add"
+    );
+    // Identity checks from the C1 fix must still be in place.
+    assert!(
+        handler.contains("p.owner == &crate::id()")
+            && handler.contains("participant_discriminator()"),
+        "cancel_round must keep the owner + discriminator account-identity \
+         checks on every participant account it refunds"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // The entropy-sysvar pin (the security-critical one)
 // ---------------------------------------------------------------------------
 

@@ -356,9 +356,9 @@ describe("admin overview", () => {
     expect(body.deposits.state).toBe("ACTIVE");
     expect(body.deposits.canAccept).toBe(true);
 
-    // 7.5% fee and the 1 / 10 / 100 SOL lanes
-    expect(body.rules.feeBps).toBe(750);
-    expect(body.rules.winnerShareBps).toBe(9_250);
+    // 2% fee (200 bps — the unified commission) and the 1 / 10 / 100 SOL lanes
+    expect(body.rules.feeBps).toBe(200);
+    expect(body.rules.winnerShareBps).toBe(9_800);
     expect(body.rules.pools.map((p) => p.capSol)).toEqual([1, 10, 100]);
   });
 
@@ -441,7 +441,7 @@ describe("deposit kill switch", () => {
     expect(res.statusCode).toBe(200);
     expect(res.json<{ deposits: { state: string } }>().deposits.state).toBe("PAUSED");
     // The fee and the network are untouched by that request.
-    expect(resolveConfig(process.env).feeBps).toBe(750);
+    expect(resolveConfig(process.env).feeBps).toBe(200);
     expect(depositState().paused).toBe(true);
     setDepositsPaused(false);
   });

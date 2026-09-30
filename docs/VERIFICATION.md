@@ -51,6 +51,6 @@ then compares against the on-chain recorded winner and the recorded fee/payout m
 ## 5. Manual verification (no code)
 
 1. `solana account <escrow>` → balance = pot.
-2. Fetch Round account → check `fee_bps=750`, `payout=pot-fee`.
+2. Fetch Round account → check `fee_bps=200`, `payout=pot-fee`.
 3. Get blockhash of `reveal_slot` (`solana block <slot>` / RPC), sha256 with round key,
    mod total weight → must equal the on-chain `winning_ticket` and map to `winner`.

@@ -10,6 +10,8 @@ import {
 import { WalletModalProvider, WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { PhantomWalletAdapter } from "@solana/wallet-adapter-phantom";
 import { SolflareWalletAdapter } from "@solana/wallet-adapter-solflare";
+import { WalletErrorBanner } from "../components/WalletErrorBanner";
+import { reportWalletError } from "../lib/walletErrors";
 import "@solana/wallet-adapter-react-ui/styles.css";
 
 const network = (process.env.NEXT_PUBLIC_SOLANA_NETWORK ?? "devnet") as
@@ -36,13 +38,21 @@ export function Providers({ children }: { children: React.ReactNode }) {
   const wallets = useMemo(() => [new PhantomWalletAdapter(), new SolflareWalletAdapter()], []);
 
   const onError = (error: Error) => {
+    // Every adapter failure (modal rejections, wallet-not-installed,
+    // unexpected disconnects) becomes a visible, dismissible banner with an
+    // actionable message instead of console-only noise. The raw error is
+    // still logged for diagnosis.
     console.error("[wallet]", error.message);
+    reportWalletError(error);
   };
 
   return (
     <ConnectionProvider endpoint={endpoint}>
       <WalletProvider wallets={wallets} onError={onError} autoConnect>
-        <WalletModalProvider>{children}</WalletModalProvider>
+        <WalletModalProvider>
+          <WalletErrorBanner />
+          {children}
+        </WalletModalProvider>
       </WalletProvider>
     </ConnectionProvider>
   );

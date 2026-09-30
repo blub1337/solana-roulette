@@ -12,6 +12,7 @@ import type { SseEvent, Tier } from "@solana-roulette/types";
 import { TIER_COUNT, TIER_META, tierFromParam, depositMessage } from "@solana-roulette/types";
 import { verifySubmittedTransaction } from "./verifyTx.js";
 import { store, broadcast } from "./store.js";
+import { buildCompletedHistory, historyDeps } from "./history.js";
 import { roundToDto, entryToDto } from "./serialize.js";
 import { tierCapLamports } from "./settlement.js";
 import { isTerminalState } from "@solana-roulette/types";
@@ -27,6 +28,7 @@ import {
 import { describeCustody, escrowBalanceLamports, requestDevnetAirdrop, type Custody } from "./custody.js";
 import { depositState } from "./adminState.js";
 import { txLog } from "./logger.js";
+import type { EffectiveFeeResolver } from "./feeTerms.js";
 
 interface RouteDeps {
   backend: ChainBackend;
@@ -34,6 +36,8 @@ interface RouteDeps {
   programId: PublicKey;
   cfg: AppConfig;
   custody: Custody;
+  /** The fee the runtime actually enforces — never derived per request. */
+  effectiveFee: EffectiveFeeResolver;
 }
 
 function roundIdFromParams(params: unknown): bigint | null {
@@ -43,7 +47,7 @@ function roundIdFromParams(params: unknown): bigint | null {
 }
 
 export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
-  const { backend, connection, programId, cfg, custody } = deps;
+  const { backend, connection, programId, cfg, custody, effectiveFee } = deps;
   const depositDeps: DepositDeps = { backend, connection, custody, cfg, programId };
 
   // ---------- SSE ----------
@@ -63,28 +67,34 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   });
 
   // ---------- config ----------
-  app.get("/api/config", async () => ({
-    network: cfg.network,
-    mainnetEnabled: cfg.mainnetEnabled,
-    devnetOnly: cfg.network === "devnet",
-    /** "chain" = deployed program. "local" = devnet ledger driving the rounds. */
-    mode: backend.mode,
-    /** Real devnet SOL moves whenever custody is ready — see /api/custody. */
-    realFunds: custody.ready,
-    /** Operator kill switch (public so the UI never invites a paused deposit). */
-    depositsPaused: depositState().paused,
-    custody: describeCustody(custody),
-    programId: cfg.programId,
-    platformFeeWallet: cfg.platformFeeWallet ?? null,
-    feeBps: cfg.feeBps,
-    winnerShareBps: 10_000 - cfg.feeBps,
-    maxRoundSizeLamports: cfg.maxRoundSizeLamports.toString(),
-    minDepositLamports: cfg.minDepositLamports.toString(),
-    maxDepositLamports: cfg.maxDepositLamports.toString(),
-    revealOffsetSlots: cfg.revealOffsetSlots,
-    tierCapsLamports: cfg.tierCapsLamports.map((c) => c.toString()),
-    treasuryAccruedLamports: backend.treasuryAccrued().toString(),
-  }));
+  // The fee reported here is the one the runtime enforces (feeTerms.ts), so the
+  // UI can render it instead of repeating a number that could drift.
+  app.get("/api/config", async () => {
+    const fee = await effectiveFee();
+    return {
+      network: cfg.network,
+      mainnetEnabled: cfg.mainnetEnabled,
+      devnetOnly: cfg.network === "devnet",
+      /** "chain" = deployed program. "local" = devnet ledger driving the rounds. */
+      mode: backend.mode,
+      /** Real devnet SOL moves whenever custody is ready — see /api/custody. */
+      realFunds: custody.ready,
+      /** Operator kill switch (public so the UI never invites a paused deposit). */
+      depositsPaused: depositState().paused,
+      custody: describeCustody(custody),
+      programId: cfg.programId,
+      platformFeeWallet: cfg.platformFeeWallet ?? null,
+      feeBps: fee.feeBps,
+      feeSource: fee.source,
+      winnerShareBps: fee.winnerShareBps,
+      maxRoundSizeLamports: cfg.maxRoundSizeLamports.toString(),
+      minDepositLamports: cfg.minDepositLamports.toString(),
+      maxDepositLamports: cfg.maxDepositLamports.toString(),
+      revealOffsetSlots: cfg.revealOffsetSlots,
+      tierCapsLamports: cfg.tierCapsLamports.map((c) => c.toString()),
+      treasuryAccruedLamports: backend.treasuryAccrued().toString(),
+    };
+  });
 
   // ---------- the three independent pool lanes (live) ----------
   app.get("/api/pools", async () => {
@@ -244,7 +254,15 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     };
   });
 
-  app.get("/api/history", async () => ({ rounds: await store.listCompletedRounds() }));
+  /**
+   * Completed rounds, rebuilt from the chain (and the audit mirror for the
+   * payout signature) rather than from process memory, so a restart does not
+   * empty history. See history.ts.
+   */
+  app.get("/api/history", async () => {
+    const rounds = await buildCompletedHistory(historyDeps(backend, connection, programId));
+    return { rounds };
+  });
 
   // ---------- deposits (REAL devnet System transfers) ----------
   /**
@@ -389,6 +407,11 @@ function parseIntentBody(
   if (!BASE58_RE.test(walletRaw)) return { ok: false, error: "wallet must be a base58 pubkey" };
   if (!/^\d+$/.test(amountRaw) || amountRaw === "0") {
     return { ok: false, error: "amountLamports must be a positive integer string" };
+  }
+  // Hardening: 19 digits is far beyond any sane deposit (≈10^10 SOL) while
+  // keeping absurdly long digit strings out of BigInt/DB parsing.
+  if (amountRaw.length > 19) {
+    return { ok: false, error: "amountLamports is out of range" };
   }
   try {
     return { ok: true, value: { wallet: new PublicKey(walletRaw), amountLamports: BigInt(amountRaw) } };

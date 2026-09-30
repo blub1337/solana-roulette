@@ -253,9 +253,92 @@ export class TxLedger {
     return this.settle(id, "FAILED", { error });
   }
 
+  /**
+   * CONFIRM a deposit whose transfer is PROVEN to have arrived while the record
+   * was already FAILED.
+   *
+   * The one direction the terminal rule has to yield. A cancel (the player
+   * closed the wallet, the client timed out) or the expiry reaper can mark a
+   * deposit FAILED while a confirmation is still reading the chain; if the money
+   * is then verified on chain and the round credits it, refusing to record that
+   * would leave the pot credited while the ledger says FAILED — and the payout
+   * is computed from CONFIRMED deposits only, so the winner would be paid short
+   * and the difference would sit unexplained in the escrow.
+   *
+   * Only the deposit confirmation path may call this, and only after the chain
+   * verified the transfer and the runtime accepted the credit. It never moves
+   * money and never runs for payouts.
+   */
+  confirmProvenArrival(id: string, details: { signature: string; confirmedAt?: Date }): ChainTx {
+    const tx = this.require(id);
+    if (tx.depositStatus === "CONFIRMED") {
+      if (tx.depositSignature && tx.depositSignature !== details.signature) {
+        throw new TxStateError("signature_conflict", "tx is already confirmed with another signature");
+      }
+      return this.clone(tx);
+    }
+    const owner = this.idBySignature.get(details.signature);
+    if (owner && owner !== id) {
+      throw new TxStateError("signature_reused", `signature already recorded on tx ${owner}`);
+    }
+    this.idBySignature.set(details.signature, id);
+    tx.depositStatus = "CONFIRMED";
+    this.writeSignature(tx, details.signature);
+    tx.confirmedAt = details.confirmedAt ?? new Date();
+    tx.lastError = null;
+    tx.nextRetryAt = null;
+    tx.updatedAt = new Date();
+    this.persist(tx);
+    txLog.info("tx.confirmed_after_late_fail", {
+      kind: tx.kind,
+      id: tx.id,
+      roundId: tx.roundId,
+      wallet: tx.wallet,
+      network: tx.network,
+      amountLamports: tx.depositAmountLamports,
+      signature: tx.depositSignature,
+      status: "CONFIRMED",
+      attempts: tx.attempts,
+    });
+    return this.clone(tx);
+  }
+
   // ------------------------------------------------------------------
   // queries
   // ------------------------------------------------------------------
+
+  /**
+   * Re-admit records read back from the audit mirror after a restart.
+   *
+   * The indexes above are what make idempotence hold: the idempotency key, the
+   * signature and the confirmed-deposit/confirmed-payout gates. They live in
+   * memory, and the mirror is written through on every state change, so a
+   * restart would otherwise come up with an EMPTY ledger — no "already
+   * deposited?" gate, no spent-signature guard, no "already paid?" guard — and
+   * the same on-chain transfer could be presented again as a fresh deposit.
+   *
+   * A record already in memory always wins, and a row whose signature is
+   * already owned by an in-memory record is skipped: restoring must never
+   * weaken a guard that is live right now. Nothing is re-mirrored — these rows
+   * were just read from the mirror.
+   */
+  restore(rows: ChainTx[]): number {
+    let restored = 0;
+    for (const row of rows) {
+      if (!row || typeof row.id !== "string" || row.id === "") continue;
+      if (typeof row.idempotencyKey !== "string" || row.idempotencyKey === "") continue;
+      if (this.byId.has(row.id)) continue;
+      if (row.depositSignature) {
+        const owner = this.idBySignature.get(row.depositSignature);
+        if (owner && owner !== row.id) continue;
+        this.idBySignature.set(row.depositSignature, row.id);
+      }
+      this.byId.set(row.id, { ...row });
+      this.idByKey.set(row.idempotencyKey, row.id);
+      restored += 1;
+    }
+    return restored;
+  }
 
   get(id: string): ChainTx | null {
     const tx = this.byId.get(id);

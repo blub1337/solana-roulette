@@ -52,7 +52,7 @@ export function BrandLogo({ className = "", fallbackClassName = "text-2xl" }: Br
       ref={ref}
       src={LOCKUP_SRC}
       alt="SolRoll"
-      className={`w-auto ${className}`}
+      className={`brand-img w-auto ${className}`}
       onError={markBroken}
     />
   );
@@ -68,7 +68,7 @@ export function BrandMark({ className = "", fallbackClassName = "text-xl" }: Bra
       ref={ref}
       src={MARK_SRC}
       alt="SolRoll"
-      className={`w-auto ${className}`}
+      className={`brand-img w-auto ${className}`}
       onError={markBroken}
     />
   );

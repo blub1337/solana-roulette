@@ -33,6 +33,7 @@ import { useCallback, useState } from "react";
 import { useWallet, useConnection } from "@solana/wallet-adapter-react";
 import type { Connection } from "@solana/web3.js";
 import { PublicKey, SystemProgram, Transaction, TransactionInstruction } from "@solana/web3.js";
+import type { WalletFailureReason } from "../lib/walletErrors";
 import {
   getEscrowPda,
   getGlobalConfigPda,
@@ -43,6 +44,12 @@ import { LAMPORTS_PER_SOL } from "@solana-roulette/types";
 import { useRuntime } from "./useRuntime";
 import { clientTxLog } from "../lib/txLog";
 import { API_BASE } from "../lib/apiBase";
+import {
+  classifyWalletError,
+  friendlyWalletError,
+  probeWalletClusterMismatch,
+  detectWalletCluster,
+} from "../lib/walletErrors";
 
 const API = API_BASE; // production-safe API base (same-origin in dev)
 const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -60,7 +67,7 @@ const CONFIRMATION_ATTEMPTS = 20;
 /** Fallback when the API has not answered yet; real value comes from /api/health. */
 const FALLBACK_PROGRAM_ID = new PublicKey(
   process.env.NEXT_PUBLIC_ROULETTE_PROGRAM_ID ??
-    "AAHBk1qbXCzsbiLe7TiXuZNTvNPVtovtC6NWk9tsi6EZ"
+    "F5kuHXicGCRnnh9SbRvxshynXPyzgzbKK1UVgTg5UZos"
 );
 
 /** Minimal base58 encoder (avoids pulling the ESM-only bs58 build into the client). */
@@ -136,8 +143,22 @@ export class DepositRejectedError extends Error {
   }
 }
 
+/**
+ * A deposit failure that already carries a user-facing message. The pool page
+ * renders `userMessage` verbatim; `reason` stays machine-readable for logs.
+ */
+export class WalletFriendlyError extends Error {
+  constructor(
+    readonly reason: WalletFailureReason | string,
+    message: string
+  ) {
+    super(message);
+    this.name = "WalletFriendlyError";
+  }
+}
+
 export function useDeposit() {
-  const { publicKey, sendTransaction } = useWallet();
+  const { publicKey, sendTransaction, wallet } = useWallet();
   const { connection } = useConnection();
   const { runtime } = useRuntime();
   const [pending, setPending] = useState(false);
@@ -175,6 +196,36 @@ export function useDeposit() {
 
       try {
         assertDevnet(connection);
+
+        // 1b. refuse early when the WALLET is on a different cluster than the
+        // app (classic case: Phantom left on Mainnet). Without this the first
+        // symptom is a misleading "Blockhash not found" from the RPC; with it
+        // the player gets told exactly what to switch before signing anything.
+        // The adapter's injected provider: newer wallet-adapter typings expose
+        // `wallet` as the wallet name (a string), so `adapter` is resolved
+        // defensively — when absent the window-injected providers below are
+        // what every browser wallet actually installs.
+        const provider =
+          (wallet as unknown as { adapter?: { _provider?: unknown } } | null | undefined)?.adapter?._provider ??
+          (globalThis as { solana?: unknown; phantom?: { solana?: unknown } }).solana ??
+          (globalThis as { phantom?: { solana?: unknown } }).phantom?.solana;
+        const probe = probeWalletClusterMismatch(provider);
+        const reportedCluster = detectWalletCluster(provider);
+        if (probe.mismatch) {
+          clientTxLog.warn("deposit.wallet_cluster_mismatch", {
+            wallet,
+            network,
+            walletCluster: probe.walletCluster,
+            appCluster: "devnet",
+          });
+          throw new WalletFriendlyError(
+            "wrong_cluster",
+            `Your wallet is on ${probe.walletCluster}, but this app only transacts on Devnet. Switch the network inside your wallet extension and try again.`
+          );
+        }
+        if (reportedCluster) {
+          clientTxLog.info("deposit.wallet_cluster", { wallet, network, cluster: reportedCluster });
+        }
 
         // 2. balance check against the real devnet RPC
         const required = lamports + TX_FEE_BUFFER_LAMPORTS + (programPath ? PARTICIPANT_RENT_LAMPORTS : 0n);
@@ -337,7 +388,20 @@ export function useDeposit() {
           via: programPath ? "program" : "system",
         };
       } catch (err) {
-        const reason = err instanceof DepositRejectedError ? err.reason : classifyError(err);
+        // The reason feeds the server-side record; the message is what the
+        // player sees. Raw wallet/RPC vocabulary ("Blockhash not found",
+        // "Attempt to debit...", adapter wrapper names) is replaced by the
+        // friendly mapping — EXCEPT for errors that already carry a curated
+        // message (DepositRejectedError / WalletFriendlyError / intent+confirm
+        // responses), which pass through untouched.
+        const reason =
+          err instanceof DepositRejectedError || err instanceof WalletFriendlyError
+            ? err.reason
+            : classifyWalletError(err);
+        const userMessage =
+          err instanceof DepositRejectedError || err instanceof WalletFriendlyError
+            ? err.message
+            : friendlyWalletError(err);
         clientTxLog.error("deposit.failed", {
           wallet,
           network,
@@ -357,7 +421,7 @@ export function useDeposit() {
             signature,
           }).catch(() => undefined);
         }
-        throw err instanceof Error ? err : new Error(String(err));
+        throw new WalletFriendlyError(reason, userMessage);
       } finally {
         setPending(false);
       }
@@ -414,18 +478,6 @@ export function formatSol(lamports: bigint): string {
   const whole = lamports / LAMPORTS_PER_SOL;
   const frac = (lamports % LAMPORTS_PER_SOL).toString().padStart(9, "0").replace(/0+$/, "");
   return frac ? `${whole}.${frac}` : whole.toString();
-}
-
-function classifyError(err: unknown): string {
-  const message = err instanceof Error ? err.message : String(err);
-  if (/reject|cancel|declin/i.test(message)) return "rejected_by_wallet";
-  if (/insufficient lamports|Attempt to debit/i.test(message)) return "insufficient_devnet_balance";
-  if (/blockhash|expired|timeout/i.test(message)) return "blockhash_expired";
-  if (/fetch failed|network|429|503/i.test(message)) return "rpc_unreachable";
-  // Program reverts surface as custom program errors (Anchor error codes).
-  if (/custom program error/i.test(message)) return "program_rejected";
-  if (/DuplicateDeposit|RoundOverCap|DepositTooSmall|DepositTooLarge/i.test(message)) return "program_rejected";
-  return "unknown_error";
 }
 
 async function apiPost(path: string, body: unknown): Promise<{ status: number; json: Record<string, unknown> }> {

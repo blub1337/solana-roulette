@@ -120,7 +120,7 @@ function makeRound(id: bigint): RoundData {
     participantCount: 0,
     lockSlot: 1n,
     revealSlot: 2n,
-    feeBps: 750,
+    feeBps: 200,
     randomness: new Uint8Array(32),
     winningTicket: 0n,
     winner: WINNER,
@@ -248,23 +248,23 @@ describe("real devnet payout", () => {
     expect(outcome.status).toBe("CONFIRMED");
     expect(sent).toHaveLength(1);
 
-    // 7.5% fee to the fee wallet + 92.5% to the winner, in ONE transaction.
-    expect(outcome.feeLamports).toBe(75_000_000n);
-    expect(outcome.payoutLamports).toBe(925_000_000n);
+    // 2% fee to the fee wallet + 98% to the winner, in ONE transaction.
+    expect(outcome.feeLamports).toBe(20_000_000n);
+    expect(outcome.payoutLamports).toBe(980_000_000n);
     const parsed = parsedFromTransaction(sent[0]!);
     const transfers = (parsed.transaction.message.instructions as Array<{ parsed: { info: { source: string; destination: string; lamports: number } } }>).map(
       (ix) => ix.parsed.info
     );
     expect(transfers).toHaveLength(2);
-    expect(transfers[0]).toMatchObject({ destination: FEE_WALLET.toBase58(), lamports: 75_000_000 });
-    expect(transfers[1]).toMatchObject({ destination: WINNER.toBase58(), lamports: 925_000_000 });
+    expect(transfers[0]).toMatchObject({ destination: FEE_WALLET.toBase58(), lamports: 20_000_000 });
+    expect(transfers[1]).toMatchObject({ destination: WINNER.toBase58(), lamports: 980_000_000 });
     expect(transfers.every((t) => t.source === OPERATOR.publicKey.toBase58())).toBe(true);
 
     const record = store.txs.getPayout(roundId);
     expect(record?.payoutStatus).toBe("CONFIRMED");
     expect(record?.depositSignature).toBeTruthy();
     expect(String(record?.depositSignature)).toHaveLength(64);
-    expect(record?.feeLamports).toBe("75000000");
+    expect(record?.feeLamports).toBe("20000000");
   });
 
   it("never pays a round without confirmed deposits", async () => {
@@ -274,6 +274,27 @@ describe("real devnet payout", () => {
     expect(outcome.status).toBe("FAILED");
     expect(sent).toHaveLength(0);
     expect(store.txs.getConfirmedPayout(roundId)).toBeNull();
+  });
+
+  it("sends exactly ONE transfer when two ticks race on the same round", async () => {
+    // Two overlapping settlement ticks (or a tick plus a manual retry) both see
+    // "not paid yet", both resolve the same payout record through the same
+    // idempotency key and both broadcast. The second send only fails afterwards,
+    // when its signature collides — the winner would already be paid twice.
+    const roundId = nextRound();
+    fundRound(roundId, [LAMPORTS_PER_SOL]);
+    const { deps, sent } = setup({ escrowBalance: 5n * LAMPORTS_PER_SOL });
+
+    const [a, b] = await Promise.all([
+      ensureRoundPaid(deps, { roundId, tier: 0, winner: WINNER.toBase58() }),
+      ensureRoundPaid(deps, { roundId, tier: 0, winner: WINNER.toBase58() }),
+    ]);
+
+    expect(sent).toHaveLength(1);
+    expect(a.status).toBe("CONFIRMED");
+    expect(b.status).toBe("CONFIRMED");
+    expect(b.signature).toBe(a.signature);
+    expect(store.txs.listByRound(roundId).filter((t) => t.kind === "PAYOUT")).toHaveLength(1);
   });
 
   it("pays the pot from confirmed deposits, not from an unconfirmed one", async () => {
@@ -296,7 +317,7 @@ describe("real devnet payout", () => {
     const outcome = await ensureRoundPaid(deps, { roundId, tier: 0, winner: WINNER.toBase58() });
     expect(outcome.status).toBe("CONFIRMED");
     expect(outcome.payoutLamports + outcome.feeLamports).toBe(400_000_000n);
-    expect(outcome.feeLamports).toBe(30_000_000n); // 7.5% of 0.4 SOL, floored
+    expect(outcome.feeLamports).toBe(8_000_000n); // 2% of 0.4 SOL, floored
   });
 
   it("never pays the same round twice", async () => {

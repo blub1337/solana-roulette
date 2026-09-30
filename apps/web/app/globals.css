@@ -6,12 +6,17 @@
   color-scheme: dark;
 }
 
+/* Circuit-tile data URI (faint traces) used as a background layer. */
+
 body {
   background:
-    radial-gradient(1200px 600px at 50% -10%, rgba(13, 78, 66, 0.6), transparent 60%),
-    radial-gradient(800px 400px at 80% 110%, rgba(230, 185, 60, 0.09), transparent 60%),
-    radial-gradient(600px 300px at 10% 30%, rgba(20, 184, 166, 0.07), transparent 65%),
-    #04140c;
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='72' height='72'%3E%3Cg stroke='%23145058' stroke-opacity='0.16' fill='none'%3E%3Cpath d='M36 0v22m0 28v22M0 36h22m28 0h22'/%3E%3Ccircle cx='36' cy='36' r='4'/%3E%3C/g%3E%3Cg fill='%23e6b93c' fill-opacity='0.05'%3E%3Ccircle cx='36' cy='36' r='1.5'/%3E%3C/g%3E%3C/svg%3E"),
+    radial-gradient(1100px 540px at 50% -8%, rgba(19, 82, 90, 0.55), transparent 66%),
+    radial-gradient(900px 520px at 50% 8%, rgba(9, 43, 53, 0.8), transparent 72%),
+    radial-gradient(760px 400px at 85% 104%, rgba(230, 185, 60, 0.08), transparent 62%),
+    radial-gradient(520px 320px at 6% 42%, rgba(45, 212, 191, 0.06), transparent 62%),
+    #02131a;
+  background-attachment: fixed;
   min-height: 100vh;
 }
 
@@ -24,7 +29,10 @@ body {
 }
 
 .panel {
-  @apply rounded-2xl border border-white/10 bg-white/[0.03] backdrop-blur;
+  @apply rounded-2xl border border-teal-200/[0.07] bg-[#03181f]/70 backdrop-blur;
+  box-shadow:
+    inset 0 1px 0 rgba(148, 233, 226, 0.05),
+    0 12px 40px rgba(0, 0, 0, 0.35);
 }
 
 .tier-card {
@@ -32,15 +40,29 @@ body {
 }
 .tier-card:hover {
   transform: translateY(-4px);
+  border-color: rgba(45, 212, 191, 0.35);
+  box-shadow:
+    inset 0 1px 0 rgba(148, 233, 226, 0.07),
+    0 16px 44px rgba(0, 0, 0, 0.45),
+    0 0 30px rgba(45, 212, 191, 0.08);
 }
 
 /* Tier accent glows (set via data-tier) */
-.tier-card[data-tier="0"] { border-color: rgba(52, 211, 153, 0.25); }
-.tier-card[data-tier="0"]:hover { box-shadow: 0 0 40px rgba(52, 211, 153, 0.18); border-color: rgba(52, 211, 153, 0.5); }
-.tier-card[data-tier="1"] { border-color: rgba(56, 189, 248, 0.25); }
+.tier-card[data-tier="0"] { border-color: rgba(45, 212, 191, 0.28); }
+.tier-card[data-tier="0"]:hover { box-shadow: 0 0 40px rgba(45, 212, 191, 0.18); border-color: rgba(45, 212, 191, 0.5); }
+.tier-card[data-tier="1"] { border-color: rgba(56, 189, 248, 0.28); }
 .tier-card[data-tier="1"]:hover { box-shadow: 0 0 40px rgba(56, 189, 248, 0.18); border-color: rgba(56, 189, 248, 0.5); }
-.tier-card[data-tier="2"] { border-color: rgba(167, 139, 250, 0.25); }
-.tier-card[data-tier="2"]:hover { box-shadow: 0 0 40px rgba(167, 139, 250, 0.18); border-color: rgba(167, 139, 250, 0.5); }
+.tier-card[data-tier="2"] { border-color: rgba(230, 185, 60, 0.28); }
+.tier-card[data-tier="2"]:hover { box-shadow: 0 0 40px rgba(230, 185, 60, 0.18); border-color: rgba(230, 185, 60, 0.5); }
+
+/* Gold hairline on top edge of tier cards — echoes the logo's gold rings. */
+.tier-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(230, 185, 60, 0.45), transparent);
+}
 
 /* ------------------------------------------------------------------ */
 /* Buttons                                                             */
@@ -90,10 +112,32 @@ body {
     inset 0 0 24px rgba(230, 185, 60, 0.06);
 }
 
-/* Solana wallet modal → match the dark/gold/teal SolRoll identity. */
+/* Hero logo environment: a soft petrol pool keyed to the emblem's own edge
+   teal (#0f3c41 top, #01141a bottom). No border — the boundary must vanish.
+   The logo itself fades out at its bitmap edges via a radial mask, so the
+   rectangular asset melts into the page instead of sitting on it. */
+.hero-halo {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  padding: clamp(10px, 2.2vw, 30px);
+  border-radius: 40px;
+  background:
+    radial-gradient(58% 52% at 50% 40%, rgba(15, 60, 65, 0.65), rgba(2, 19, 26, 0) 74%),
+    radial-gradient(40% 36% at 50% 32%, rgba(230, 185, 60, 0.08), transparent 70%);
+}
+.hero-halo img {
+  border-radius: 28px;
+  -webkit-mask-image: radial-gradient(118% 118% at 50% 46%, #000 60%, transparent 93%);
+  mask-image: radial-gradient(118% 118% at 50% 46%, #000 60%, transparent 93%);
+  filter: drop-shadow(0 0 34px rgba(32, 178, 170, 0.18));
+}
+
+/* Solana wallet modal → match the petrol/gold SolRoll identity. */
 .wallet-adapter-modal-wrapper {
-  background-color: #072013;
+  background-color: #052028;
   border: 1px solid rgba(230, 185, 60, 0.25);
+  box-shadow: 0 0 60px rgba(15, 60, 65, 0.55);
 }
 .wallet-adapter-modal-list-more {
   color: rgba(245, 241, 230, 0.6) !important;
@@ -137,7 +181,7 @@ body {
 /* ------------------------------------------------------------------ */
 
 .pool-track {
-  @apply h-2.5 w-full overflow-hidden rounded-full bg-felt-800 ring-1 ring-inset ring-white/5;
+  @apply h-2.5 w-full overflow-hidden rounded-full bg-[#02141a] ring-1 ring-inset ring-teal-100/5;
 }
 
 .pool-fill {
@@ -156,7 +200,7 @@ body {
 
 /* Skeleton loading */
 .skeleton {
-  @apply animate-pulse rounded-lg bg-felt-800/80;
+  @apply animate-pulse rounded-lg bg-[#032129]/80;
 }
 
 /* Winner pop-in */
@@ -170,9 +214,27 @@ body {
 @keyframes spin-slow { to { transform: rotate(360deg); } }
 .animate-spin-slow { animation: spin-slow 3s linear infinite; }
 
+/* Softly round every logo rendering (navbar, hero, footer, pool header).
+   The asset is a portrait rectangle; a gentle radius + edge mask removes the
+   hard bitmap corners so it sits naturally on any surface. */
+.brand-img {
+  border-radius: 18px;
+  -webkit-mask-image: radial-gradient(130% 130% at 50% 46%, #000 68%, transparent 96%);
+  mask-image: radial-gradient(130% 130% at 50% 46%, #000 68%, transparent 96%);
+}
+
+/* Hero entrance: the emblem rises out of the background on first paint. */
+@keyframes hero-rise {
+  from { opacity: 0; transform: translateY(14px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.hero-halo img {
+  animation: hero-rise 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
-  .pool-fill, .animate-spin-slow, .winner-pop { animation: none; }
+  .pool-fill, .animate-spin-slow, .winner-pop, .hero-halo img { animation: none; }
   .tier-card:hover { transform: none; }
 }
 

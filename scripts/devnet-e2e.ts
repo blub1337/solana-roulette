@@ -5,7 +5,7 @@
  *     setup   generate + fund test wallets with real devnet SOL
  *     open    open a tier-0 round through the API's real operator code path
  *     deposit real deposits from the test wallets, fill to the tier cap
- *     settle  lock -> wait reveal window -> settle -> pay (92.5% / 7.5%)
+ *     settle  lock -> wait reveal window -> settle -> pay (pot minus fee / fee)
  *     verify  fund accounting, next round, API + SSE reflection
  *
  * Lifecycle txs go through `buildAndSendLifecycleTx` from apps/api/src — the
@@ -49,7 +49,7 @@ const STAGE = process.argv[2];
 const PARTICIPANT_RENT = 1_163_320n; // rent-exempt minimum for a 101-byte Participant
 const TIER = 0;
 const TIER_CAP = 1_000_000_000n; // on-chain tier_caps[0]
-const FEE_BPS = 750n;
+const FEE_BPS = 200n;
 const DEPOSITS = [400_000_000n, 300_000_000n, 300_000_000n]; // sums exactly to the cap
 
 const connection = new Connection(RPC, "confirmed");
@@ -347,15 +347,17 @@ async function main() {
 
     // Control: the RPC blockhash is NOT the program's input. This is the bug
     // that made the draw unreproducible before reveal_input was persisted.
-    const block = await connection.getBlock(Number(settled.reveal_slot), { maxSupportedTransactionVersion: 0 });
+    // maxSupportedTransactionVersion: devnet blocks now contain version-1
+    // transactions; the server rejects lower caps with -32015 and names 1.
+    const block = await connection.getBlock(Number(settled.reveal_slot), { maxSupportedTransactionVersion: 1 });
     if (block) {
       const bh = new Uint8Array(new PublicKey(block.blockhash).toBytes());
       const fromBlockhash = Buffer.from(deriveRandomness(bh, roundId)).toString("hex");
       record("getBlock(reveal_slot).blockhash is NOT the draw input (expected)", fromBlockhash !== settled.randomness, `getBlock=${block.blockhash}`);
     }
 
-    record("fee = 7.5% of pot", settled.fee_lamports === split.fee, `${settled.fee_lamports} == ${split.fee}`);
-    record("payout = 92.5% of pot", settled.payout_lamports === split.payout, `${settled.payout_lamports} == ${split.payout}`);
+    record("fee = round.fee_bps share of pot", settled.fee_lamports === split.fee, `${settled.fee_lamports} == ${split.fee}`);
+    record("payout = pot minus fee", settled.payout_lamports === split.payout, `${settled.payout_lamports} == ${split.payout}`);
     record("payout + fee == pot", settled.payout_lamports + settled.fee_lamports === settled.pot, `${settled.payout_lamports} + ${settled.fee_lamports} = ${settled.pot}`);
     record("settle moved no lamports", escBefore === st.escrowAfterDeposits, `escrow still ${escBefore}`);
 
@@ -374,15 +376,15 @@ async function main() {
     console.log(`    treasury ${TREASURY.toBase58()}  ${treasuryBefore} -> ${treasuryAfter}  (+${tDelta})`);
     console.log(`    escrow   ${escBefore} -> ${escAfter}`);
     console.log(`    status   ${done.statusName}`);
-    record("winner received 92.5% of pot", wDelta === settled.payout_lamports, `+${wDelta} == ${settled.payout_lamports}`);
-    record("treasury received 7.5% of pot", tDelta === settled.fee_lamports, `+${tDelta} == ${settled.fee_lamports}`);
+    record("winner received pot minus fee", wDelta === settled.payout_lamports, `+${wDelta} == ${settled.payout_lamports}`);
+    record("treasury received fee share", tDelta === settled.fee_lamports, `+${tDelta} == ${settled.fee_lamports}`);
     record("escrow drained to rent-exemption only", escAfter === 650240, `${escAfter} lamports remain`);
     record("RANDOMNESS_PENDING -> COMPLETED", done.statusName === "COMPLETED", `status ${done.statusName} (code ${done.status})`);
 
     st.settle = {
       lockSig, settleSig, paySig: pay!.signature,
       lockSlot: String(settled.lock_slot), revealSlot: String(settled.reveal_slot),
-      revealBlockhash: Buffer.from(revealBlockhash).toString("hex"),
+      revealBlockhash: settled.reveal_input,
       randomness: settled.randomness, ticket: String(settled.winning_ticket),
       winner: settled.winner, winnerLabel: names[settled.winner] ?? "?",
       pot: settled.pot.toString(), payout: settled.payout_lamports.toString(), fee: settled.fee_lamports.toString(),
@@ -409,8 +411,8 @@ async function main() {
       const netAfterDeposit = BigInt(now) - BigInt(d0.balanceAfter);
       console.log(`    ${p.label} ${p.wallet}  stake ${p.amount}  payout ${netAfterDeposit >= 0n ? "+" : ""}${netAfterDeposit}`);
     }
-    record("winner credited exactly 92.5%", BigInt(s.winnerAfter) - BigInt(s.winnerBefore) === BigInt(s.payout), `+${BigInt(s.winnerAfter) - BigInt(s.winnerBefore)}`);
-    record("treasury credited exactly 7.5%", BigInt(s.treasuryAfter) - BigInt(s.treasuryBefore) === BigInt(s.fee), `+${BigInt(s.treasuryAfter) - BigInt(s.treasuryBefore)}`);
+    record("winner credited pot minus fee", BigInt(s.winnerAfter) - BigInt(s.winnerBefore) === BigInt(s.payout), `+${BigInt(s.winnerAfter) - BigInt(s.winnerBefore)}`);
+    record("treasury credited fee share", BigInt(s.treasuryAfter) - BigInt(s.treasuryBefore) === BigInt(s.fee), `+${BigInt(s.treasuryAfter) - BigInt(s.treasuryBefore)}`);
     record("winner + treasury == pot (nothing lost/created)", BigInt(s.payout) + BigInt(s.fee) === pot, `${s.payout} + ${s.fee} = ${pot}`);
     const esc = (await connection.getAccountInfo(ek, "confirmed"))!;
     record("escrow retains only rent-exemption", esc.lamports === 650240, `${esc.lamports} lamports`);

@@ -40,7 +40,7 @@ async function main() {
   const [configPda] = getGlobalConfigPda(programId);
 
   const operatorArg = payer.publicKey.toBuffer(); // first INSTRUCTION ARG in lib.rs
-  const feeBps = Number(process.env.FEE_BPS ?? 750);
+  const feeBps = Number(process.env.FEE_BPS ?? 200);
   const maxRoundSize = BigInt(process.env.MAX_ROUND_SIZE_LAMPORTS ?? 10_000_000_000);
   const minDeposit = BigInt(process.env.MIN_DEPOSIT_LAMPORTS ?? 10_000_000);
   const maxDeposit = BigInt(process.env.MAX_DEPOSIT_LAMPORTS ?? 1_000_000_000);

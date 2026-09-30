@@ -14,7 +14,9 @@ import { BrandLogo, BRAND_NAME } from "../../../components/BrandLogo";
 import { useRoundState } from "../../../hooks/useRoundState";
 import { useDeposit } from "../../../hooks/useDeposit";
 import { useRuntime } from "../../../hooks/useRuntime";
+import { useFeeTerms } from "../../../hooks/useFeeTerms";
 import { useSse } from "../../../hooks/useSse";
+import { API_BASE } from "../../../lib/apiBase";
 import { TIER_META, type Tier } from "@solana-roulette/types";
 
 function lamportsToSol(lamports: string | undefined | null): string {
@@ -35,6 +37,8 @@ export default function PoolRoom() {
   const { round, entries, loading, error, refresh } = useRoundState(tier);
   const { deposit, pending } = useDeposit();
   const { runtime } = useRuntime();
+  // The fee the runtime enforces, never a hardcoded percentage.
+  const fee = useFeeTerms();
 
   const [amountSol, setAmountSol] = useState("0.1");
   const [notice, setNotice] = useState<{
@@ -87,6 +91,9 @@ export default function PoolRoom() {
       });
       void refresh();
     } catch (e) {
+      // The hook maps every failure to a player-facing sentence (wallet
+      // rejections, wrong cluster, blockhash expiry, RPC trouble, program
+      // reverts). Show it verbatim; the machine reason went to the tx log.
       setNotice({
         kind: "err",
         text: `${e instanceof Error ? e.message : "Deposit failed"} Nothing was credited.`,
@@ -121,11 +128,10 @@ export default function PoolRoom() {
             {round && <StatusPill status={round.status} />}
           </div>
           <p className="mt-1 text-sm text-ivory/60">
-            Round #{round?.id ?? "—"} · cap {meta.capSol} SOL · 7.5% platform fee enforced by the
-            runtime
+            Round #{round?.id ?? "—"} · cap {meta.capSol} SOL · {fee ? fee.feePercent : "—"}%
+            platform fee enforced by the runtime
           </p>
         </div>
-        <WalletMultiButton />
       </header>
 
       <ModeBanner runtime={runtime} />
@@ -309,7 +315,8 @@ export default function PoolRoom() {
 function VerifyPanel({ roundId }: { roundId: string }) {
   const [result, setResult] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
-  const API = process.env.NEXT_PUBLIC_API_URL ?? "";
+  // Same base as every other browser fetch: production-safe, loopback-guarded.
+  const API = API_BASE;
 
   const run = useCallback(async () => {
     setBusy(true);

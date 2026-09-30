@@ -140,6 +140,18 @@ pub struct CreateRoundArgs {
 }
 
 #[derive(Accounts)]
+pub struct SetFee<'info> {
+    #[account(mut, seeds = [CONFIG_SEED], bump)]
+    pub config: Account<'info, GlobalConfig>,
+    /// The ONLY key allowed to move the platform fee: the stored operator.
+    /// Same trust root that opens rounds; devnet ops convenience, mainnet
+    /// would need a timelock/multisig around this (docs/ROADMAP.md).
+    #[account(mut)]
+    pub operator: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 pub struct CreateRound<'info> {
     /// Validated against config PDA seeds in lib.rs (owner + bump re-derivation).
     /// CHECK: manual PDA validation in lib.rs.
