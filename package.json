@@ -29,7 +29,8 @@
     "preview": "sh ./scripts/start-preview.sh",
     "db:migrate": "npm run db:migrate -w apps/api",
     "db:generate": "npm run db:generate -w apps/api",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "e2e:live-cycle": "tsx scripts/devnet-live-cycle-e2e.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.46.0",
