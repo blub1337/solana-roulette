@@ -173,7 +173,7 @@ function AdminLogin({ onAuthed }: { onAuthed: () => void }) {
             err.notConfigured
               ? "The admin API is disabled: set ADMIN_TOKEN in the server environment and restart the API."
               : err.unauthorized
-                ? "Wrong token. It is the ADMIN_TOKEN value from your server environment (Render → Environment)."
+                ? "Wrong token. The API expects the ADMIN_TOKEN configured in its own server environment — for this preview that is the workspace environment (Settings → Environment), on Render the service's Environment tab. Paste it exactly, with no extra spaces or line breaks."
                 : err.message
           );
         } else {
@@ -246,6 +246,330 @@ function StatusPill({ status }: { status: string }) {
 function TxBadge({ status }: { status: AdminTxRow["status"] }) {
   const tone = status === "CONFIRMED" ? "ok" : status === "FAILED" ? "bad" : "warn";
   return <Chip tone={tone}>{status ?? "PENDING"}</Chip>;
+}
+
+// ---------------------------------------------------------------------------
+// operator settings (fee, per-user pool caps, deposit limits, fee wallet)
+// ---------------------------------------------------------------------------
+
+interface AdminSettingsResponse {
+  settings: {
+    userCapLamportsByTier: [string, string, string];
+    minDepositLamports: string | null;
+    maxDepositLamports: string | null;
+    updatedAt: string;
+    updatedBy: string;
+  };
+  onChain: {
+    feeBps: number;
+    minDepositLamports: string;
+    maxDepositLamports: string;
+    tierCapsLamports: string[];
+  };
+  fees: { wallet: string | null; balanceLamports: string | null; explorer: string | null };
+  withdrawal: { keyConfigured: boolean; reason: string };
+}
+
+/** Parse a decimal SOL string into lamports; null when empty or malformed. */
+function solToLamports(v: string): bigint | null {
+  const s = v.trim();
+  if (s === "") return null;
+  if (!/^\d+(\.\d{0,9})?$/.test(s)) return null;
+  const [whole, frac = ""] = s.split(".");
+  return BigInt(whole!) * 1_000_000_000n + BigInt((frac + "000000000").slice(0, 9));
+}
+
+/** Lamports (integer string) → trimmed decimal SOL, "" when unset. */
+function lamportsToSol(v: string | null | undefined): string {
+  if (v === null || v === undefined || v === "") return "";
+  try {
+    const n = BigInt(v);
+    const whole = n / 1_000_000_000n;
+    const frac = (n % 1_000_000_000n).toString().padStart(9, "0").replace(/0+$/, "");
+    return frac ? `${whole}.${frac}` : whole.toString();
+  } catch {
+    return "";
+  }
+}
+
+const SETTINGS_INPUT =
+  "w-full rounded-xl border border-felt-600 bg-felt-950/60 px-3 py-2 font-mono text-sm text-ivory outline-none transition placeholder:text-ivory/30 focus:border-gold-500";
+
+function AdminSettingsSection({ onChanged }: { onChanged: () => void }) {
+  const [data, setData] = useState<AdminSettingsResponse | null>(null);
+  const [feeBps, setFeeBps] = useState("");
+  const [caps, setCaps] = useState<[string, string, string]>(["", "", ""]);
+  const [minSol, setMinSol] = useState("");
+  const [maxSol, setMaxSol] = useState("");
+  const [to, setTo] = useState("");
+  const [amountSol, setAmountSol] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const hydrate = useCallback((d: AdminSettingsResponse) => {
+    setData(d);
+    setFeeBps(String(d.onChain.feeBps));
+    setCaps([
+      lamportsToSol(d.settings.userCapLamportsByTier[0]),
+      lamportsToSol(d.settings.userCapLamportsByTier[1]),
+      lamportsToSol(d.settings.userCapLamportsByTier[2]),
+    ]);
+    setMinSol(lamportsToSol(d.settings.minDepositLamports));
+    setMaxSol(lamportsToSol(d.settings.maxDepositLamports));
+  }, []);
+
+  const load = useCallback(async () => {
+    try {
+      const d = await adminFetch<AdminSettingsResponse>("/api/admin/settings");
+      hydrate(d);
+      setErr(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not load settings");
+    }
+  }, [hydrate]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const run = useCallback(
+    async (fn: () => Promise<string>) => {
+      setBusy(true);
+      setMsg(null);
+      setErr(null);
+      try {
+        setMsg(await fn());
+        onChanged();
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : "Request failed");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [onChanged]
+  );
+
+  const saveSettings = () =>
+    run(async () => {
+      const capLamports = caps.map((c) => (solToLamports(c) ?? 0n).toString());
+      const res = await adminFetch<{ settings: AdminSettingsResponse["settings"] }>("/api/admin/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          userCapLamportsByTier: capLamports,
+          minDepositLamports: minSol.trim() === "" ? null : (solToLamports(minSol) ?? -1n).toString(),
+          maxDepositLamports: maxSol.trim() === "" ? null : (solToLamports(maxSol) ?? -1n).toString(),
+        }),
+      });
+      await load();
+      return `Settings saved (${res.settings.updatedAt.slice(11, 19)} UTC).`;
+    });
+
+  const saveFee = () =>
+    run(async () => {
+      const res = await adminFetch<{ feeBps: number; explorer: string | null }>("/api/admin/fee", {
+        method: "POST",
+        body: JSON.stringify({ feeBps: Number(feeBps) }),
+      });
+      await load();
+      return `Platform fee set on chain to ${(res.feeBps / 100).toFixed(2)}%. Applies to rounds locked from now on.`;
+    });
+
+  const withdraw = () =>
+    run(async () => {
+      const lamports = solToLamports(amountSol);
+      if (lamports === null || lamports <= 0n) throw new Error("Enter an amount greater than 0 SOL");
+      const res = await adminFetch<{ lamports: string; to: string; explorer: string | null }>(
+        "/api/admin/withdraw",
+        { method: "POST", body: JSON.stringify({ to, lamports: lamports.toString() }) }
+      );
+      await load();
+      setAmountSol("");
+      return `Withdrew ${lamportsToSol(res.lamports)} SOL to ${short(res.to)}.`;
+    });
+
+  // The most that can leave the fee wallet in one transfer: the balance minus a
+  // small buffer for the ~5000-lamport transaction fee. Mirrors the server
+  // guard in withdrawFeeWallet, so "Max" always passes validation.
+  const maxWithdrawLamports = (() => {
+    const raw = data?.fees.balanceLamports;
+    if (!raw) return 0n;
+    try {
+      const b = BigInt(raw);
+      return b > 5_000n ? b - 5_000n : 0n;
+    } catch {
+      return 0n;
+    }
+  })();
+
+  const onChain = data?.onChain;
+
+  return (
+    <Section
+      title="Operator settings"
+      subtitle="Off-chain limits applied by this API, the on-chain fee, and the fee wallet."
+      actions={<Chip tone="muted">operator only</Chip>}
+    >
+      {err ? (
+        <p className="mb-4 rounded-xl border border-roulette-red/60 bg-roulette-red/10 px-4 py-3 text-sm text-roulette-red">
+          {err}
+        </p>
+      ) : null}
+      {msg ? (
+        <p className="mb-4 rounded-xl border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-300">
+          {msg}
+        </p>
+      ) : null}
+
+      {/* Platform fee (on-chain) */}
+      <div className="mb-5">
+        <h3 className="stat-label mb-2">Platform fee (on chain)</h3>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="text-sm text-ivory/70">
+            Fee (bps)
+            <input
+              className={`mt-1 ${SETTINGS_INPUT}`}
+              inputMode="numeric"
+              value={feeBps}
+              onChange={(e) => setFeeBps(e.target.value)}
+              placeholder="200"
+            />
+          </label>
+          <button type="button" disabled={busy} onClick={() => void saveFee()} className="btn-gold">
+            {busy ? "Working…" : "Set fee"}
+          </button>
+          <span className="text-xs text-ivory/50">
+            current {onChain ? (onChain.feeBps / 100).toFixed(2) : "—"}% · max 30% (program cap) · 100% = 10000 bps
+          </span>
+        </div>
+      </div>
+
+      {/* Per-user pool caps + deposit limits (off-chain) */}
+      <div className="mb-5">
+        <h3 className="stat-label mb-2">Betting limits (off-chain, soft)</h3>
+        <div className="grid gap-3 md:grid-cols-3">
+          {([0, 1, 2] as const).map((tier) => (
+            <label key={tier} className="text-sm text-ivory/70">
+              Max per user · pool {tier + 1}
+              <input
+                className={`mt-1 ${SETTINGS_INPUT}`}
+                inputMode="decimal"
+                value={caps[tier]}
+                onChange={(e) =>
+                  setCaps((prev) => {
+                    const next = [...prev] as [string, string, string];
+                    next[tier] = e.target.value;
+                    return next;
+                  })
+                }
+                placeholder="0 = no limit"
+              />
+              <span className="mt-1 block text-[11px] text-ivory/40">
+                pool cap {onChain ? lamportsToSol(onChain.tierCapsLamports[tier]) : "—"} SOL
+              </span>
+            </label>
+          ))}
+        </div>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <label className="text-sm text-ivory/70">
+            Min deposit (SOL)
+            <input
+              className={`mt-1 ${SETTINGS_INPUT}`}
+              inputMode="decimal"
+              value={minSol}
+              onChange={(e) => setMinSol(e.target.value)}
+              placeholder={`on-chain ${onChain ? lamportsToSol(onChain.minDepositLamports) : "—"}`}
+            />
+          </label>
+          <label className="text-sm text-ivory/70">
+            Max deposit (SOL)
+            <input
+              className={`mt-1 ${SETTINGS_INPUT}`}
+              inputMode="decimal"
+              value={maxSol}
+              onChange={(e) => setMaxSol(e.target.value)}
+              placeholder={`on-chain ${onChain ? lamportsToSol(onChain.maxDepositLamports) : "—"}`}
+            />
+          </label>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <button type="button" disabled={busy} onClick={() => void saveSettings()} className="btn-gold">
+            {busy ? "Working…" : "Save limits"}
+          </button>
+          <span className="text-xs text-ivory/50">
+            Empty = use the on-chain value. The API can only tighten the on-chain limits.
+          </span>
+        </div>
+      </div>
+
+      {/* Fee wallet */}
+      <div>
+        <h3 className="stat-label mb-2">Fee wallet</h3>
+        <div className="grid gap-4 md:grid-cols-2">
+          <Address label="Fee wallet" value={data?.fees.wallet ?? null} href={data?.fees.explorer ?? null} />
+          <div className="grid gap-x-8">
+            <Row
+              label="Balance"
+              value={data?.fees.balanceLamports != null ? sol(data.fees.balanceLamports) : "—"}
+            />
+            <Row
+              label="Withdrawals"
+              value={data?.withdrawal.keyConfigured ? "enabled" : "disabled"}
+              hint={data?.withdrawal.keyConfigured ? undefined : data?.withdrawal.reason}
+            />
+          </div>
+        </div>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <label className="text-sm text-ivory/70">
+            Withdraw to (address)
+            <input
+              className={`mt-1 ${SETTINGS_INPUT}`}
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              placeholder="destination wallet"
+              disabled={!data?.withdrawal.keyConfigured}
+            />
+          </label>
+          <label className="text-sm text-ivory/70">
+            <span className="flex items-center justify-between">
+              Amount (SOL)
+              <button
+                type="button"
+                onClick={() => setAmountSol(lamportsToSol(maxWithdrawLamports.toString()))}
+                disabled={!data?.withdrawal.keyConfigured || maxWithdrawLamports <= 0n}
+                className="text-xs font-medium text-gold-500 transition hover:opacity-80 disabled:opacity-40"
+              >
+                Max ({sol(maxWithdrawLamports.toString())} SOL)
+              </button>
+            </span>
+            <input
+              className={`mt-1 ${SETTINGS_INPUT}`}
+              inputMode="decimal"
+              value={amountSol}
+              onChange={(e) => setAmountSol(e.target.value)}
+              placeholder="0.0"
+              disabled={!data?.withdrawal.keyConfigured}
+            />
+          </label>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            disabled={busy || !data?.withdrawal.keyConfigured || to.trim() === "" || amountSol.trim() === ""}
+            onClick={() => void withdraw()}
+            className="btn-ghost"
+          >
+            {busy ? "Working…" : "Withdraw"}
+          </button>
+          <span className="text-xs text-ivory/50">
+            {data?.withdrawal.keyConfigured
+              ? "Signed with FEE_WALLET_KEYPAIR (server-side, never shown)."
+              : data?.withdrawal.reason ?? "Fee-wallet withdrawals are unavailable."}
+          </span>
+        </div>
+      </div>
+    </Section>
+  );
 }
 
 export default function AdminPage() {
@@ -346,6 +670,29 @@ export default function AdminPage() {
         if (res.deposits.state) await load();
       } catch (err) {
         setNotice(err instanceof Error ? err.message : "Could not change the deposit state");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [load]
+  );
+
+  // Reset a pool lane stuck on a never-filling OPEN round: the API cancels the
+  // round (refunding each participant exactly on chain) and opens a fresh one,
+  // so wallets locked by `already_deposited` can deposit into the new round.
+  const resetLane = useCallback(
+    async (tier: number) => {
+      setBusy(true);
+      setNotice(null);
+      try {
+        const res = await adminFetch<{ detail: string; newRoundId: string | null; explorer: string | null }>(
+          "/api/admin/lane/advance",
+          { method: "POST", body: JSON.stringify({ tier }) }
+        );
+        setNotice(`Pool ${tier + 1}: ${res.detail}.`);
+        await load();
+      } catch (err) {
+        setNotice(err instanceof Error ? err.message : "Could not reset the pool lane");
       } finally {
         setBusy(false);
       }
@@ -623,10 +970,31 @@ export default function AdminPage() {
             </p>
           </Section>
 
+          {/* Operator settings */}
+          <AdminSettingsSection onChanged={() => void load()} />
+
           {/* Rounds */}
           <Section
             title="Rounds"
             subtitle={`${overview.rounds.openCount} open · ${overview.rounds.completedCount} completed · open pot ${sol(overview.rounds.openPotLamports)}`}
+            actions={
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[11px] uppercase tracking-widest text-ivory/40">
+                  reset stuck lane
+                </span>
+                {[0, 1, 2].map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void resetLane(t)}
+                    className="btn-ghost px-2.5 py-1 text-[11px]"
+                  >
+                    pool {t + 1}
+                  </button>
+                ))}
+              </div>
+            }
           >
             <div className="grid gap-4 lg:grid-cols-2">
               <div>
@@ -672,6 +1040,13 @@ export default function AdminPage() {
                   settled payouts {sol(overview.rounds.settledPayoutLamports)} · fees{" "}
                   {sol(overview.rounds.settledFeeLamports)}
                 </div>
+                <p className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs leading-relaxed text-amber-200/80">
+                  A round only closes at its pool cap, so a quiet lane can sit open forever — and
+                  because one wallet gets one entry per round, everyone inside it is locked out of
+                  that lane (the &quot;already deposited&quot; case). The driver refunds and reopens a
+                  never-filling round automatically (ROUND_TIMEOUT_MS, default 15 min); the pool
+                  buttons above do it immediately. Refunds are exact and enforced by the program.
+                </p>
               </div>
             </div>
           </Section>

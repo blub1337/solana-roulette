@@ -8,7 +8,8 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { PublicKey } from "@solana/web3.js";
-import { advanceTierLane, createGuardedTick } from "./settlement.js";
+import { advanceTierLane, createGuardedTick, runLeaderTick } from "./settlement.js";
+import type { DriverLease } from "./settlementLease.js";
 import type { ChainBackend, LifecycleAction, LifecycleArgs } from "./backend.js";
 import type { RoundData, ParticipantData, GlobalConfigData } from "@solana-roulette/verification";
 import { resolveConfig } from "@solana-roulette/config";
@@ -274,5 +275,87 @@ describe("settlement tick re-entrancy", () => {
     await expect(tick()).rejects.toThrow("rpc down");
     await expect(tick()).rejects.toThrow("rpc down");
     expect(pass).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * Cross-instance single writer.
+ *
+ * Two deployments sharing one program and one audit database used to drive the
+ * same lanes: both saw the same terminal head and each opened a "next" round,
+ * orphaning one of them. A shared lease (a Postgres advisory lock in
+ * production; a shared fake here) makes exactly one instance the driver, so the
+ * standby never calls the ledger at all.
+ */
+describe("settlement leader lease (one driver per program)", () => {
+  function sharedLease(lock: { holder: string | null }, id: string): DriverLease {
+    return {
+      kind: "postgres",
+      async acquire() {
+        if (lock.holder === null) {
+          lock.holder = id;
+          return true;
+        }
+        return lock.holder === id;
+      },
+      async release() {
+        if (lock.holder === id) lock.holder = null;
+      },
+    };
+  }
+
+  it("only the holder advances a terminal lane; the standby creates nothing", async () => {
+    // Both drivers see the SAME completed head (the orphan scenario).
+    const h = harness({ round: makeRound({ status: "COMPLETED" }) });
+    const lock = { holder: null as string | null };
+    const deps = { backend: h.backend, cfg };
+    const tick = async () => {
+      await advanceTierLane(0, deps);
+      return true;
+    };
+
+    expect(await runLeaderTick(sharedLease(lock, "A"), tick)).toBe("ran");
+    expect(await runLeaderTick(sharedLease(lock, "B"), tick)).toBe("standby");
+
+    // Exactly one create — no duplicate/orphan round.
+    expect(h.calls.map((c) => c.action)).toEqual(["create"]);
+  });
+
+  it("a standby takes over after the holder steps down", async () => {
+    const h = harness({ round: makeRound({ status: "COMPLETED" }) });
+    const lock = { holder: null as string | null };
+    const deps = { backend: h.backend, cfg };
+    const tick = async () => {
+      await advanceTierLane(0, deps);
+      return true;
+    };
+    const a = sharedLease(lock, "A");
+    const b = sharedLease(lock, "B");
+
+    expect(await runLeaderTick(a, tick)).toBe("ran");
+    expect(await runLeaderTick(b, tick)).toBe("standby");
+    await a.release();
+    expect(await runLeaderTick(b, tick)).toBe("ran");
+  });
+
+  it("reports busy (not standby) when a pass is already in flight", async () => {
+    const deps = { backend: harness({ round: makeRound() }).backend, cfg };
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let startedResolve!: () => void;
+    const started = new Promise<void>((r) => (startedResolve = r));
+    const inner = createGuardedTick(deps, async () => {
+      startedResolve();
+      await gate;
+    });
+    const lease = sharedLease({ holder: null }, "A");
+
+    const first = runLeaderTick(lease, inner);
+    await started; // the pass is now in flight
+    const second = await runLeaderTick(lease, inner);
+    expect(second).toBe("busy");
+
+    release();
+    expect(await first).toBe("ran");
   });
 });

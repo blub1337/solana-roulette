@@ -16,6 +16,9 @@ operator*.json
 # Generated devnet operator SECRET (64-byte array). Never commit, never paste
 # into a repo, an issue or a chat — it signs payouts.
 operator-devnet.key.json
+# Generated devnet FEE-WALLET SECRET (64-byte array). Never commit, never paste
+# into a repo, an issue or a chat — it signs fee-wallet withdrawals.
+fee-wallet-devnet.key.json
 *.key.json
 *.keypair.json
 # Staged Render env line produced by scripts/set-render-operator-key.mjs --stage (contains the secret)

@@ -11,6 +11,7 @@ import { StatusPill, TierBadge } from "../../../components/StatusPill";
 import { ModeBanner } from "../../../components/ModeBanner";
 import { DevnetBadge } from "../../../components/DevnetBadge";
 import { BrandLogo, BRAND_NAME } from "../../../components/BrandLogo";
+import { LiveChat } from "../../../components/LiveChat";
 import { useRoundState } from "../../../hooks/useRoundState";
 import { useDeposit } from "../../../hooks/useDeposit";
 import { useRuntime } from "../../../hooks/useRuntime";
@@ -78,6 +79,17 @@ export default function PoolRoom() {
 
   const onDeposit = useCallback(async () => {
     if (!publicKey || !round) return;
+    // Defence in depth: only ever deposit into the round THIS lane is showing.
+    // (useRoundState already drops another lane's round on navigation, so a
+    // pool switch can never build a transaction against the old round id.)
+    if (round.tier !== tier) {
+      setNotice({
+        kind: "err",
+        text: "This pool changed round while you were switching pools — reloading the current round. Please try again in a moment.",
+      });
+      void refresh();
+      return;
+    }
     setNotice(null);
     try {
       const result = await deposit({ roundId: round.id, amountSol, tier });
@@ -94,9 +106,15 @@ export default function PoolRoom() {
       // The hook maps every failure to a player-facing sentence (wallet
       // rejections, wrong cluster, blockhash expiry, RPC trouble, program
       // reverts). Show it verbatim; the machine reason went to the tx log.
+      const raw = e instanceof Error ? e.message : "Deposit failed";
+      // `already_deposited` means the wallet is genuinely in THIS round already
+      // (one entry per wallet per round). Never surface the raw error code:
+      // explain the rule and how the lane reopens for the next round.
       setNotice({
         kind: "err",
-        text: `${e instanceof Error ? e.message : "Deposit failed"} Nothing was credited.`,
+        text: /already_deposited/i.test(raw)
+          ? "You already have an entry in this round — one entry per wallet per round. Join again when this pool opens its next round; a low-traffic round that never fills is refunded and reopened automatically."
+          : `${raw} Nothing was credited.`,
       });
       void refresh();
     }
@@ -186,6 +204,23 @@ export default function PoolRoom() {
         {/* Deposit + odds */}
         <section className="felt-card p-6">
           <h2 className="mb-4 font-display text-xl text-gold-300">Place your bet</h2>
+          {notice && (
+            <div className={notice.kind === "ok" ? "banner-success" : "banner-error"}>
+              <span>
+                {notice.text}{" "}
+                {notice.explorer && (
+                  <a
+                    href={notice.explorer}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="underline decoration-dotted"
+                  >
+                    View on Solana Explorer (devnet) ↗
+                  </a>
+                )}
+              </span>
+            </div>
+          )}
           {!loading && !round ? (
             <div className="banner-info">
               <span>
@@ -200,6 +235,16 @@ export default function PoolRoom() {
               <span>
                 Round is <strong>{round.status}</strong> — deposits are closed.
                 {spinning && " The winner is being determined…"}
+              </span>
+            </div>
+          ) : myEntry ? (
+            <div className="banner-info">
+              <span>
+                You already have an entry in round <strong>#{round?.id}</strong> (
+                {lamportsToSol(myEntry.amountLamports)} ◎). One entry per wallet per round — you
+                can join again when this pool opens its next round. A low-traffic round that never
+                reaches its cap is refunded and reopened automatically, so a quiet pool can never
+                lock you out.
               </span>
             </div>
           ) : (
@@ -231,23 +276,6 @@ export default function PoolRoom() {
                   {pending ? "Signing…" : "Deposit"}
                 </button>
               </div>
-              {notice && (
-                <div className={notice.kind === "ok" ? "banner-success" : "banner-error"}>
-                  <span>
-                    {notice.text}{" "}
-                    {notice.explorer && (
-                      <a
-                        href={notice.explorer}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="underline decoration-dotted"
-                      >
-                        View on Solana Explorer (devnet) ↗
-                      </a>
-                    )}
-                  </span>
-                </div>
-              )}
             </>
           )}
 
@@ -304,9 +332,31 @@ export default function PoolRoom() {
 
       {round && <VerifyPanel roundId={round.id} />}
 
+      {/* Always-visible live chat, defaulting to this pool's lobby (never a popup). */}
+      <div className="mt-6">
+        <LiveChat defaultLobby={`/pool/${tier}`} />
+      </div>
+
       <footer className="mt-10 border-t border-felt-700 pt-6 text-center text-xs text-ivory/40">
-        {BRAND_NAME} · DEVNET demonstration. No real-money wagering. The winner is determined by
-        the runtime and is independently verifiable — see docs/VERIFICATION.md.
+        <p>
+          {BRAND_NAME} · DEVNET demonstration. No real-money wagering. The winner is determined by
+          the runtime and is independently verifiable — see docs/VERIFICATION.md.
+        </p>
+        <a
+          href="https://x.com/EpicMindFX"
+          target="_blank"
+          rel="noreferrer"
+          aria-label="SolRoll on X (@EpicMindFX)"
+          className="mt-3 inline-flex items-center gap-2 rounded-full border border-felt-600 bg-felt-900/70 px-3 py-1.5 text-xs text-ivory/70 transition hover:border-gold-500/60 hover:text-gold-300"
+        >
+          <span
+            aria-hidden
+            className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-gold-500/15 text-[11px] font-bold text-gold-300"
+          >
+            X
+          </span>
+          @EpicMindFX
+        </a>
       </footer>
     </main>
   );

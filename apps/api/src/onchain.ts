@@ -128,7 +128,159 @@ export async function checkSystemTransfer(
   return { ok: true, transfer: match, slot: tx.slot, feePayer, logCount: tx.meta?.logMessages?.length ?? 0 };
 }
 
-/** One-line description of the transfers found, for error messages and logs. */
+// ---------------------------------------------------------------------------
+// Program payout verification (chain mode, settlement phase 2)
+//
+// In chain mode `pay_winners` moves the lamports PROGRAM-SIDE: the round
+// escrow PDA pays `round.payout_lamports` to the frozen winner and
+// `round.fee_lamports` to `config.treasury` (lib.rs pay_winners). The server
+// only triggers that instruction, so the amounts the driver celebrates must
+// be proven from the chain, not assumed from the send() success.
+//
+// Verification reads the transaction back and checks the BALANCE DELTAS of
+// the three program-pinned accounts:
+//
+//   1. the tx is confirmed and error-free;
+//   2. it invoked THIS program with the `pay_winners` discriminator;
+//   3. winner account balance increased by EXACTLY `payoutLamports`;
+//   4. treasury balance increased by EXACTLY `feeLamports`;
+//   5. escrow balance decreased by EXACTLY their sum — no lamport can leave
+//      the escrow unaccounted for, whether by transfer, rent change or any
+//      other mechanism (balance deltas are stronger than transfer parsing).
+//
+// The fee payer is deliberately NOT pinned (unlike the deposit check):
+// lock/settle/pay are permissionless by design, so any signer may have paid
+// the transaction fee. Only the three program-pinned accounts matter.
+//
+// Degenerate case: if the frozen winner ever equalled the treasury, the two
+// credits would merge into one balance and the exact-split check would fail.
+// That configuration cannot occur through deposit/lock flows (the treasury is
+// config-pinned, the winner is a participant), and a failure here is loud and
+// retried rather than silently celebrated — the safe direction.
+// ---------------------------------------------------------------------------
+
+/** Anchor discriminator of the program's `pay_winners` instruction. */
+const PAY_WINNERS_DISCRIMINATOR = globalDiscriminator("pay_winners");
+
+export interface ProgramPayoutCheckArgs {
+  signature: string;
+  programId: PublicKey;
+  /** The round escrow PDA that pays (balance must DROP by the exact sum). */
+  escrow: PublicKey;
+  /** Frozen winner from settle phase 1 (balance must RISE by payout). */
+  winner: PublicKey;
+  /** config.treasury / platform fee wallet (balance must RISE by fee). */
+  treasury: PublicKey;
+  /** Frozen `round.payout_lamports` from settle phase 1. */
+  payoutLamports: bigint;
+  /** Frozen `round.fee_lamports` from settle phase 1. */
+  feeLamports: bigint;
+}
+
+export type ProgramPayoutCheck =
+  | { ok: true; slot: number; feePayer: string; logCount: number; escrowDebit: bigint }
+  | { ok: false; code: string; detail: string };
+
+/**
+ * Verify that `signature` is a confirmed, error-free invocation of the
+ * roulette program's `pay_winners` instruction that moved EXACTLY the frozen
+ * amounts: winner +payoutLamports, treasury +feeLamports, escrow −(sum).
+ * Verified against account BALANCE DELTAS from the transaction metadata, so
+ * every lamport leaving the escrow is accounted for.
+ */
+export async function checkProgramPayout(
+  connection: Connection,
+  args: ProgramPayoutCheckArgs
+): Promise<ProgramPayoutCheck> {
+  const { signature, programId, escrow, winner, treasury, payoutLamports, feeLamports } = args;
+
+  let tx: ParsedTransactionWithMeta | null;
+  try {
+    tx = await fetchParsedTransaction(connection, signature);
+  } catch (err) {
+    return { ok: false, code: "rpc_error", detail: err instanceof Error ? err.message : String(err) };
+  }
+  if (!tx) {
+    return { ok: false, code: "tx_not_found", detail: "not found on devnet RPC at confirmed commitment" };
+  }
+  if (tx.meta?.err) {
+    return { ok: false, code: "tx_failed_on_chain", detail: JSON.stringify(tx.meta.err) };
+  }
+
+  // The tx must actually invoke THIS program's pay_winners instruction.
+  const invokedPayWinners = tx.transaction.message.instructions.some((ins) => {
+    if (!("programId" in ins) || !("data" in ins)) return false;
+    if (!ins.programId.equals(programId)) return false;
+    const data = Buffer.from(bs58.decode(ins.data));
+    return data.length >= 8 && data.subarray(0, 8).equals(PAY_WINNERS_DISCRIMINATOR);
+  });
+  if (!invokedPayWinners) {
+    return {
+      ok: false,
+      code: "no_program_payout",
+      detail: `transaction does not invoke ${programId.toBase58()} pay_winners`,
+    };
+  }
+
+  // Balance-delta verification against the tx metadata.
+  const keys = tx.transaction.message.accountKeys.map((k) => k.pubkey);
+  const indexOf = (pk: PublicKey): number | null => {
+    const idx = keys.findIndex((k) => k.equals(pk));
+    return idx === -1 ? null : idx;
+  };
+  const iEscrow = indexOf(escrow);
+  const iWinner = indexOf(winner);
+  const iTreasury = indexOf(treasury);
+  if (iEscrow === null) {
+    return { ok: false, code: "escrow_not_in_tx", detail: `escrow ${escrow.toBase58()} is not part of the transaction` };
+  }
+  if (iWinner === null) {
+    return { ok: false, code: "winner_not_in_tx", detail: `winner ${winner.toBase58()} is not part of the transaction` };
+  }
+  if (iTreasury === null) {
+    return { ok: false, code: "treasury_not_in_tx", detail: `treasury ${treasury.toBase58()} is not part of the transaction` };
+  }
+
+  const pre = tx.meta?.preBalances;
+  const post = tx.meta?.postBalances;
+  if (!pre || !post || pre.length !== post.length) {
+    return { ok: false, code: "missing_balance_meta", detail: "transaction metadata is missing pre/postBalances" };
+  }
+
+  const escrowDebit = BigInt(pre[iEscrow]! - post[iEscrow]!);
+  const winnerCredit = BigInt(post[iWinner]! - pre[iWinner]!);
+  const treasuryCredit = BigInt(post[iTreasury]! - pre[iTreasury]!);
+
+  if (winnerCredit !== payoutLamports) {
+    return {
+      ok: false,
+      code: "winner_amount_mismatch",
+      detail: `winner balance rose by ${winnerCredit}, frozen payout is exactly ${payoutLamports}`,
+    };
+  }
+  if (treasuryCredit !== feeLamports) {
+    return {
+      ok: false,
+      code: "treasury_amount_mismatch",
+      detail: `treasury balance rose by ${treasuryCredit}, frozen fee is exactly ${feeLamports}`,
+    };
+  }
+  if (escrowDebit !== payoutLamports + feeLamports) {
+    return {
+      ok: false,
+      code: "escrow_outflow_mismatch",
+      detail: `escrow balance dropped by ${escrowDebit}, expected exactly ${payoutLamports + feeLamports}`,
+    };
+  }
+
+  return {
+    ok: true,
+    slot: tx.slot,
+    feePayer: tx.transaction.message.accountKeys[0]?.pubkey.toBase58() ?? "",
+    logCount: tx.meta?.logMessages?.length ?? 0,
+    escrowDebit,
+  };
+}
 export function describe(transfers: SystemTransfer[]): string {
   if (transfers.length === 0) return "none";
   return transfers.map((t) => `${t.amount} ${t.from.toBase58().slice(0, 6)}->${t.to.toBase58().slice(0, 6)}`).join(", ");

@@ -40,4 +40,6 @@ pub enum RouletteError {
     InvalidTreasury,
     #[msg("Unknown pool tier (must be 0, 1 or 2)")]
     InvalidTier,
+    #[msg("Treasury address must not be the default (zero) address")]
+    InvalidTreasuryAddress,
 }

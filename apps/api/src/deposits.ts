@@ -23,6 +23,7 @@ import { depositAttemptOf, depositKey, txToDto, TxStateError, type ChainTx } fro
 import { checkSystemTransfer, checkProgramDeposit, logRpcView, COMMITMENT } from "./onchain.js";
 import { requireCustody, type Custody, DEVNET_EXPLORER_TX } from "./custody.js";
 import { depositState } from "./adminState.js";
+import { effectiveMaxDeposit, effectiveMinDeposit, userCapForTier } from "./adminSettings.js";
 import { txLog } from "./logger.js";
 import { LocalLedgerError } from "./localLedger.js";
 import { tierCapLamports } from "./settlement.js";
@@ -93,14 +94,40 @@ export async function createDepositIntent(
   const { roundId, wallet, amountLamports } = args;
   const round = await backend.getRound(roundId);
   if (!round) throw new DepositError("round_not_found", `round ${roundId} does not exist`, 404);
+  // A legacy (pre-`reveal_input`) round is readable but NOT operable: the
+  // deployed program cannot deserialize it, so a deposit into it reverts with
+  // AnchorError 3003 (AccountDidNotDeserialize). Refuse the intent here rather
+  // than let the player's wallet build a transaction guaranteed to fail; the
+  // settlement driver is reopening the lane on a fresh round.
+  if (round.legacy) {
+    throw new DepositError(
+      "stale_round",
+      `round ${roundId} predates the current program layout and cannot accept deposits; this pool is being reopened`,
+      409
+    );
+  }
   if (round.status !== "OPEN") {
     throw new DepositError("round_not_open", `round ${roundId} is ${round.status}`, 409);
   }
-  if (amountLamports < cfg.minDepositLamports) {
-    throw new DepositError("DepositTooSmall", `${amountLamports} < ${cfg.minDepositLamports}`);
+  // Effective bounds = off-chain override (if the operator set one) else the
+  // on-chain value. The overrides can only tighten, so a deposit accepted here
+  // is always one the program accepts too.
+  const minDeposit = effectiveMinDeposit(cfg);
+  const maxDeposit = effectiveMaxDeposit(cfg);
+  if (amountLamports < minDeposit) {
+    throw new DepositError("DepositTooSmall", `${amountLamports} < ${minDeposit}`);
   }
-  if (amountLamports > cfg.maxDepositLamports) {
-    throw new DepositError("DepositTooLarge", `${amountLamports} > ${cfg.maxDepositLamports}`);
+  if (amountLamports > maxDeposit) {
+    throw new DepositError("DepositTooLarge", `${amountLamports} > ${maxDeposit}`);
+  }
+  // Off-chain per-user, per-pool cap (soft). There is one entry per wallet per
+  // round, so this is exactly the wallet's stake in this pool round.
+  const userCap = userCapForTier(round.tier);
+  if (userCap > 0n && amountLamports > userCap) {
+    throw new DepositError(
+      "UserCapExceeded",
+      `${amountLamports} exceeds the per-user cap ${userCap} for tier ${round.tier}`
+    );
   }
   const cap = tierCapLamports(cfg, round.tier);
   if (round.pot + amountLamports > cap) {
@@ -113,7 +140,34 @@ export async function createDepositIntent(
   const wallet58 = wallet.toBase58();
   const confirmed = store.txs.getConfirmedDeposit(roundId, wallet58);
   if (confirmed) {
-    throw new DepositError("already_deposited", "this wallet already has a confirmed entry in this round", 409);
+    // The ledger alone is NOT authoritative for "already deposited": a
+    // CONFIRMED row can be a PHANTOM. The audit mirror restores rows written by
+    // another deployment (or another program state) into a round id the chain has
+    // since re-created, and a cancelled round refunds its participants on chain
+    // while its ledger rows live on. Trusting the ledger blindly is exactly what
+    // locked wallets out of quiet lanes with `already_deposited`.
+    //
+    // The chain decides. The round is only blocked when it still records this
+    // wallet as a participant; otherwise the row is orphaned and the deposit
+    // proceeds. A round with `participantCount === 0` provably contains nobody,
+    // so the participant scan is only needed once the round is non-empty.
+    const onChain: Participation =
+      round.participantCount === 0
+        ? "absent"
+        : await onChainParticipation(backend, roundId, wallet58);
+    if (onChain !== "absent") {
+      throw new DepositError("already_deposited", "this wallet already has a confirmed entry in this round", 409);
+    }
+    store.txs.orphanConfirmedDeposit(
+      confirmed.id,
+      `no on-chain participant for round ${roundId} (chain-reconciled phantom row)`
+    );
+    txLog.warn("deposit.phantom_row_cleared", {
+      id: confirmed.id,
+      roundId: roundId.toString(),
+      wallet: wallet58,
+      network: custody.cluster,
+    });
   }
   const existing = store.txs.getDeposit(roundId, wallet58);
   if (existing?.depositStatus === "PENDING") {
@@ -147,6 +201,35 @@ export async function createDepositIntent(
 function depositRecipient(deps: DepositDeps, roundId: bigint): PublicKey {
   if (deps.backend.mode === "chain") return getEscrowPda(deps.programId, roundId)[0];
   return requireCustody(deps.custody).escrow!;
+}
+
+/**
+ * Whether `wallet` is recorded as a participant of `roundId` ON CHAIN.
+ *
+ * "absent" = the round's participant list was read and does not contain the
+ * wallet. "member" = it does. "unknown" = the list could not be read (RPC
+ * error), in which case the caller keeps the conservative ledger verdict: the
+ * program still rejects a genuine duplicate on chain, so this only affects how
+ * friendly the error is, never whether a second entry can land.
+ */
+type Participation = "member" | "absent" | "unknown";
+
+async function onChainParticipation(
+  backend: ChainBackend,
+  roundId: bigint,
+  wallet58: string
+): Promise<Participation> {
+  try {
+    const participants = await backend.getParticipants(roundId);
+    return participants.some((p) => p.wallet.toBase58() === wallet58) ? "member" : "absent";
+  } catch (err) {
+    txLog.warn("deposit.participant_read_failed", {
+      roundId: roundId.toString(),
+      wallet: wallet58,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return "unknown";
+  }
 }
 
 /**
@@ -456,6 +539,11 @@ export async function reconcilePendingDeposits(
   let confirmed = 0;
   let failed = 0;
   for (const tx of stale) {
+    // Defensive: this reconciler only owns DEPOSIT rows. `listStalePending`
+    // already filters to kind === "DEPOSIT"; skipping here too keeps a payout
+    // row (whose depositStatus can be a stale "PENDING") out of this loop even
+    // if that query's contract ever changes.
+    if (tx.kind !== "DEPOSIT") continue;
     if (tx.depositSignature) {
       const result = await confirmDeposit(deps, { depositId: tx.id, signature: tx.depositSignature });
       if (result.status === 200) {

@@ -20,14 +20,21 @@
 import { PublicKey, type Connection } from "@solana/web3.js";
 import type { AppConfig } from "@solana-roulette/config";
 import {
+  decodeRound,
   fetchRoundAccount,
   fetchParticipantsForRound,
-  getRoundPda,
   type GlobalConfigData,
   type ParticipantData,
   type RoundData,
 } from "@solana-roulette/verification";
-import { buildAndSendLifecycleTx, fetchOnChainConfig } from "./operator.js";
+import {
+  buildAndSendLifecycleTx,
+  fetchOnChainConfig,
+  requireFeeWallet,
+} from "./operator.js";
+import { checkProgramPayout } from "./onchain.js";
+import { getEscrowPda, getRoundPda } from "@solana-roulette/verification";
+import { txLog } from "./logger.js";
 import { LocalLedger } from "./localLedger.js";
 
 export type BackendMode = "chain" | "local";
@@ -63,6 +70,14 @@ export interface ChainBackend {
   getRevealBlockhash(slot: bigint): Promise<Uint8Array | null>;
   /** Head round per pool lane. */
   getHeadByTier(): Promise<bigint[]>;
+  /**
+   * Read several rounds in as few round trips as possible. Optional: the
+   * default walks `getRound` one id at a time. The chain backend overrides it
+   * with a batched `getMultipleAccountsInfo` read (the rate-limit pattern used
+   * by history.ts and routes.ts); test fakes and the local ledger rely on the
+   * sequential default.
+   */
+  getRounds?(roundIds: bigint[]): Promise<Map<string, RoundData>>;
   runLifecycle(action: LifecycleAction, args?: LifecycleArgs): Promise<LifecycleResult | null>;
   /**
    * Credit a CONFIRMED deposit into the round. Called only after the transfer
@@ -91,6 +106,25 @@ export function createChainBackend(
     realFunds: true,
     async getRound(roundId) {
       return fetchRoundAccount(connection, programId, roundId);
+    },
+    async getRounds(roundIds) {
+      const out = new Map<string, RoundData>();
+      const CHUNK = 100; // Solana RPC caps a batch at 100 accounts
+      for (let i = 0; i < roundIds.length; i += CHUNK) {
+        const chunk = roundIds.slice(i, i + CHUNK);
+        const keys = chunk.map((id) => getRoundPda(programId, id)[0]);
+        const infos = await connection.getMultipleAccountsInfo(keys);
+        chunk.forEach((id, idx) => {
+          const info = infos[idx];
+          if (!info?.data) return;
+          try {
+            out.set(id.toString(), decodeRound(info.data));
+          } catch {
+            // A malformed/legacy account is simply not part of the window.
+          }
+        });
+      }
+      return out;
     },
     async getParticipants(roundId) {
       const [roundPk] = getRoundPda(programId, roundId);
@@ -125,7 +159,77 @@ export function createChainBackend(
         roundId: args.roundId,
         tier: args.tier,
       });
-      return result ? { ...result } : null;
+      if (!result) return null;
+      // PAYOUT VERIFICATION BRIDGE (chain mode): `pay_winners` moves the
+      // lamports program-side out of the round escrow PDA. A successful send
+      // alone proves nothing about WHERE the lamports went, so verification is
+      // MANDATORY for every pay result: the transaction is re-read from the
+      // chain and its balance deltas are checked against the amounts frozen on
+      // the Round account at settle phase 1 (re-read here, never taken from
+      // the operator result). A payout that cannot be proven to the exact
+      // lamport is reported as "nothing happened this tick" (null): the
+      // settlement driver then neither marks the round COMPLETED nor advances
+      // the lane, and the next tick re-reads the still-RANDOMNESS_PENDING
+      // round and can retry the permissionless instruction (a no-op when the
+      // round is already paid).
+      if (action === "pay") {
+        const round = await fetchRoundAccount(connection, programId, result.roundId);
+        if (!round || round.winner.equals(PublicKey.default)) {
+          txLog.error("payout.verify_unreadable", {
+            roundId: result.roundId.toString(),
+            signature: result.signature,
+            network: cfg.network,
+          });
+          return null;
+        }
+        try {
+          const check = await checkProgramPayout(connection, {
+            signature: result.signature,
+            programId,
+            escrow: getEscrowPda(programId, result.roundId)[0],
+            winner: round.winner,
+            treasury: requireFeeWallet(cfg),
+            payoutLamports: round.payoutLamports,
+            feeLamports: round.feeLamports,
+          });
+          if (!check.ok) {
+            txLog.error("payout.program_verify_failed", {
+              roundId: result.roundId.toString(),
+              tier: round.tier,
+              winner: round.winner.toBase58(),
+              amountLamports: round.payoutLamports.toString(),
+              feeLamports: round.feeLamports.toString(),
+              network: cfg.network,
+              signature: result.signature,
+              status: "FAILED",
+              error: `${check.code}: ${check.detail}`,
+            });
+            return null;
+          }
+          txLog.info("payout.program_verified", {
+            roundId: result.roundId.toString(),
+            tier: round.tier,
+            winner: round.winner.toBase58(),
+            amountLamports: round.payoutLamports.toString(),
+            feeLamports: round.feeLamports.toString(),
+            escrowDebitLamports: check.escrowDebit.toString(),
+            network: cfg.network,
+            signature: result.signature,
+            status: "CONFIRMED",
+          });
+        } catch (err) {
+          // Verification infrastructure failed (RPC down, etc.). Same policy as
+          // a failed check: never celebrate an unproven payout.
+          txLog.error("payout.verify_error", {
+            roundId: result.roundId.toString(),
+            signature: result.signature,
+            network: cfg.network,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return null;
+        }
+      }
+      return { ...result };
     },
     async deposit(args) {
       // The program credited the round when it processed the deposit

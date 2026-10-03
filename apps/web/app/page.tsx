@@ -10,6 +10,8 @@ import { useSse } from "../hooks/useSse";
 import { ModeBanner } from "../components/ModeBanner";
 import { DevnetBadge } from "../components/DevnetBadge";
 import { BrandLogo, BrandMark, BRAND_NAME } from "../components/BrandLogo";
+import { LiveChat } from "../components/LiveChat";
+import { TopWinners } from "../components/TopWinners";
 import { WalletMultiButton } from "./providers";
 import { TIER_META, TIER_COUNT, type Tier } from "@solana-roulette/types";
 
@@ -74,9 +76,6 @@ export default function Home() {
           never by the frontend, never by us.
         </p>
       </header>
-
-      <ModeBanner runtime={runtime} />
-      <DevnetBadge />
 
       {error && (
         <div className="banner-error justify-center">
@@ -187,6 +186,25 @@ export default function Home() {
             })}
       </section>
 
+      {/*
+       * Runtime + devnet disclosures sit BELOW the pool boxes, so the pools are
+       * the first thing on the page and the fee wallet, escrow, faucet and
+       * "real devnet transactions" note follow underneath them.
+       */}
+      <div className="mt-6">
+        <ModeBanner runtime={runtime} />
+        <DevnetBadge />
+      </div>
+
+      {/*
+       * Always-visible community area: the live chat on one side, the top
+       * winners window (same look) on the other. Neither is a popup.
+       */}
+      <section className="mt-6 grid gap-6 lg:grid-cols-2">
+        <LiveChat defaultLobby="/" />
+        <TopWinners />
+      </section>
+
       {/* Fee split */}
       <section className="panel mt-6 flex flex-wrap items-center justify-between gap-4 p-5">
         <div>
@@ -235,6 +253,21 @@ export default function Home() {
             className="h-10 w-auto opacity-90"
             fallbackClassName="text-lg"
           />
+          <a
+            href="https://x.com/EpicMindFX"
+            target="_blank"
+            rel="noreferrer"
+            aria-label="SolRoll on X (@EpicMindFX)"
+            className="inline-flex items-center gap-2 rounded-full border border-felt-600 bg-felt-900/70 px-3 py-1.5 text-xs text-ivory/70 transition hover:border-gold-500/60 hover:text-gold-300"
+          >
+            <span
+              aria-hidden
+              className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-gold-500/15 text-[11px] font-bold text-gold-300"
+            >
+              X
+            </span>
+            @EpicMindFX
+          </a>
           <p className="text-xs text-ivory/40">
             {BRAND_NAME} · DEVNET demonstration. No real-money wagering. The winner is determined
             by the runtime and is independently verifiable — see{" "}

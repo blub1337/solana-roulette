@@ -4,18 +4,21 @@ import cors from "@fastify/cors";
 import { resolveConfig, MainnetDisabledError } from "@solana-roulette/config";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { registerRoutes } from "./routes.js";
-import { startSettlementDriver, type SettlementDriverDeps } from "./settlement.js";
+import { startSettlementDriver, rehydrateLaneHeads, type SettlementDriverDeps } from "./settlement.js";
 import { resolveBackend, type ChainBackend } from "./backend.js";
 import { registerPreviewProxy } from "./previewProxy.js";
 import { describeCustody, resolveCustody, type Custody } from "./custody.js";
 import { registerAdminRoutes } from "./adminRoutes.js";
 import { historyDeps, rehydrateCompletedRounds } from "./history.js";
 import { hydrateAdminState, initAdminState, depositState } from "./adminState.js";
+import { hydrateGameSettings, initGameSettings } from "./adminSettings.js";
 import { createFeeResolver } from "./feeTerms.js";
 import { reconcilePendingDeposits, type DepositDeps } from "./deposits.js";
 import { postgresMirror, store } from "./store.js";
 import { ensureRoundPaid, type PayoutOutcome, type PayoutTarget } from "./payout.js";
 import { txLog, safeEndpoint } from "./logger.js";
+import { installProcessGuards } from "./processGuards.js";
+import { registerChatRoutes } from "./chat.js";
 
 export interface ApiDeps {
   connection: Connection;
@@ -30,6 +33,8 @@ export async function buildServer(deps?: ApiDeps) {
   // an operator paused deposits before the last restart (never the reverse).
   initAdminState(cfg.depositsPaused);
   await hydrateAdminState();
+  initGameSettings();
+  await hydrateGameSettings();
   await restoreTransactionLedger();
   const connection =
     deps?.connection ?? new Connection(cfg.rpcUrl, { commitment: "confirmed" });
@@ -85,6 +90,8 @@ export async function buildServer(deps?: ApiDeps) {
   const effectiveFee = createFeeResolver(active, cfg);
 
   await registerRoutes(app, { backend: active, connection, programId, cfg, custody, effectiveFee });
+  // Live chat: wallet-signed sessions, SSE fan-out, per-wallet cooldown.
+  await registerChatRoutes(app);
   // Admin console API. Fails closed without ADMIN_TOKEN — there is no
   // read-only fallback, and it can only ever return public addresses.
   await registerAdminRoutes(app, {
@@ -119,6 +126,23 @@ export async function buildServer(deps?: ApiDeps) {
 
   // Operator settlement loop — automatic, no admin, no AI.
   const driverDeps: SettlementDriverDeps = { backend: active, cfg, payouts: payoutService };
+  // Repair the lane heads BEFORE the driver's first tick: the in-memory array
+  // boots at [1,2,3] and, in chain mode, pointing lanes at long-completed
+  // rounds makes the driver open duplicate rounds while the real heads never
+  // advance (the "stale lane heads" bug). Never blocks listen(), never throws;
+  // a failed pass leaves the boot defaults in place for the driver to heal
+  // later (LANE_HEAD_REHYDRATE_MS). A few retries absorb an RPC hiccup at boot.
+  void (async () => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const report = await rehydrateLaneHeads(driverDeps);
+        if (report.restored > 0 || report.counter !== null) break;
+      } catch {
+        /* fall through to the next attempt */
+      }
+      await new Promise((r) => setTimeout(r, 2_000 * attempt));
+    }
+  })();
   startSettlementDriver(driverDeps);
 
   // Rebuild history from the chain before the first request can ask for it.
@@ -177,6 +201,9 @@ async function restoreTransactionLedger(): Promise<void> {
 }
 
 export async function start() {
+  // A fire-and-forget RPC error (e.g. web3.js surfacing a 429 from the public
+  // devnet RPC) must degrade the service, not kill it — see processGuards.ts.
+  installProcessGuards();
   try {
     const app = await buildServer();
     const port = Number(process.env.PORT ?? 4000);

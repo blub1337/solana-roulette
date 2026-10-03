@@ -174,7 +174,8 @@ export type SseEventType =
   | "settlement"
   | "new_round"
   | "tx"
-  | "config";
+  | "config"
+  | "chat";
 
 export interface SseEvent {
   type: SseEventType;

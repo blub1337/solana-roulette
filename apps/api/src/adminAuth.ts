@@ -123,3 +123,9 @@ export function verifyAdminToken(
   failures.delete(key);
   return { ok: true };
 }
+
+/** Test-only: clear the per-address failure throttle so one suite cannot leak
+ *  a 429 cool-down into the next. Mirrors `resetAdminStateForTests`. */
+export function resetAdminThrottleForTests(): void {
+  failures.clear();
+}

@@ -102,6 +102,8 @@ a database write succeeded.
 |---|---|
 | Double deposit (same wallet, same round) | `deposit:<round>:<wallet>` idempotency key + unique index `(round_id, player_wallet)` |
 | Deposit replay after refresh | The intent endpoint resumes the existing `PENDING` record; a confirmed one returns `409 already_deposited` |
+| Phantom `already_deposited` (stale ledger row) | The gate is **chain-authoritative**: a wallet is only refused when the round still records it as a participant. A `CONFIRMED` row the round does not back (an audit-mirror row from another deployment, or a cancelled round whose participants were refunded) is orphaned and the deposit proceeds. A round with `participantCount = 0` is trivially phantom. |
+| Frozen lane (quiet round never reaches its cap) | After `ROUND_TIMEOUT_MS` of a **funded** round being observed `OPEN`, the driver cancels it (operator `cancel_round` refunds every participant exactly on chain) and reopens the lane; the cancelled round's ledger entries are orphaned. `POST /api/admin/lane/advance` resets a lane on demand. |
 | Signature replay | A signature can be bound to exactly one record (`signature_reused`) |
 | Double spending | Every `PENDING` record is re-verified against the chain before any retry; payouts verify the exact outflow (fee + payout) |
 | Duplicate payout | `payout:<round>:<attempt>` key + `getConfirmedPayout` short-circuit; a confirmed payout returns `alreadyPaid` and sends nothing |

@@ -34,6 +34,8 @@ import { buildServer } from "./server.js";
 import { createLocalBackend } from "./backend.js";
 import { runOnce, type SettlementDriverDeps } from "./settlement.js";
 import { depositState, resetAdminStateForTests, setDepositsPaused } from "./adminState.js";
+import { resetGameSettingsForTests } from "./adminSettings.js";
+import { resetAdminThrottleForTests } from "./adminAuth.js";
 import { logRing } from "./logBuffer.js";
 import { store, postgresMirror } from "./store.js";
 import { txLog } from "./logger.js";
@@ -176,6 +178,7 @@ const ENV_KEYS = [
   "TIER_CAPS_SOL",
   "MIN_DEPOSIT_LAMPORTS",
   "MAX_DEPOSIT_LAMPORTS",
+  "FEE_WALLET_KEYPAIR",
   "LEDGER_MODE",
   "DATABASE_URL",
   "ADMIN_TOKEN",
@@ -226,6 +229,8 @@ afterAll(async () => {
 
 beforeEach(() => {
   resetAdminStateForTests();
+  resetGameSettingsForTests();
+  resetAdminThrottleForTests();
   logRing.clear();
 });
 
@@ -308,8 +313,15 @@ describe("admin authentication", () => {
       { method: "GET" as const, url: "/api/admin/transactions" },
       { method: "GET" as const, url: "/api/admin/logs" },
       { method: "POST" as const, url: "/api/admin/deposits" },
+      { method: "GET" as const, url: "/api/admin/settings" },
+      { method: "PUT" as const, url: "/api/admin/settings" },
+      { method: "POST" as const, url: "/api/admin/fee" },
+      { method: "POST" as const, url: "/api/admin/withdraw" },
       { method: "GET" as const, url: "/api/admin/ping" },
     ]) {
+      // Each route gets a clean throttle window so the 429 cool-down never
+      // masks a route that forgot its guard.
+      resetAdminThrottleForTests();
       const res = await app.inject(call);
       expect(res.statusCode, `${call.url} must be gated`).toBe(401);
     }
@@ -456,6 +468,93 @@ describe("deposit kill switch", () => {
     expect(pools.statusCode).toBe(200);
     expect(pools.json<{ pools: unknown[] }>().pools).toHaveLength(3);
     setDepositsPaused(false);
+  });
+});
+
+describe("operator settings console", () => {
+  it("reports the off-chain settings and the live on-chain bounds", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/admin/settings", headers: AUTH });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{
+      settings: { userCapLamportsByTier: string[]; minDepositLamports: string | null };
+      onChain: {
+        feeBps: number;
+        minDepositLamports: string;
+        maxDepositLamports: string;
+        tierCapsLamports: string[];
+      };
+      fees: { wallet: string | null; balanceLamports: string | null };
+      withdrawal: { keyConfigured: boolean };
+    }>();
+    expect(body.settings.userCapLamportsByTier).toEqual(["0", "0", "0"]);
+    expect(body.settings.minDepositLamports).toBeNull();
+    // No config account in local mode → falls back to the resolved config.
+    expect(body.onChain.minDepositLamports).toBe("1000000");
+    expect(body.onChain.maxDepositLamports).toBe("1000000000");
+    expect(body.onChain.tierCapsLamports).toHaveLength(3);
+    expect(body.fees.wallet).toBe(FEE_WALLET.toBase58());
+    // FEE_WALLET_KEYPAIR is not configured in this suite.
+    expect(body.withdrawal.keyConfigured).toBe(false);
+  });
+
+  it("updates the off-chain limits and reports them back", async () => {
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/admin/settings",
+      headers: AUTH,
+      payload: {
+        userCapLamportsByTier: [0, 0, "5000000000"],
+        minDepositLamports: "20000000",
+        maxDepositLamports: "500000000",
+      },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json<{
+      ok: boolean;
+      settings: { userCapLamportsByTier: string[]; minDepositLamports: string | null; maxDepositLamports: string | null };
+    }>();
+    expect(body.ok).toBe(true);
+    expect(body.settings.userCapLamportsByTier).toEqual(["0", "0", "5000000000"]);
+    expect(body.settings.minDepositLamports).toBe("20000000");
+    expect(body.settings.maxDepositLamports).toBe("500000000");
+
+    const read = await app.inject({ method: "GET", url: "/api/admin/settings", headers: AUTH });
+    expect(read.json<{ settings: { minDepositLamports: string | null } }>().settings.minDepositLamports).toBe(
+      "20000000"
+    );
+  });
+
+  it("400s an override outside the on-chain window instead of widening it", async () => {
+    const res = await app.inject({
+      method: "PUT",
+      url: "/api/admin/settings",
+      headers: AUTH,
+      payload: { minDepositLamports: "1" },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json<{ error: string }>().error).toBe("min_below_onchain");
+  });
+
+  it("refuses an on-chain fee change in local mode", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/fee",
+      headers: AUTH,
+      payload: { feeBps: 150 },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json<{ error: string }>().error).toBe("not_chain_mode");
+  });
+
+  it("refuses a fee-wallet withdrawal in local mode", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/admin/withdraw",
+      headers: AUTH,
+      payload: { to: FEE_WALLET.toBase58(), lamports: "1000" },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(res.json<{ error: string }>().error).toBe("not_chain_mode");
   });
 });
 

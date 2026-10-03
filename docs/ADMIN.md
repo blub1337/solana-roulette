@@ -8,8 +8,15 @@ Scope, on purpose:
 | | |
 |---|---|
 | **Read** | devnet/mainnet status, RPC health, escrow + operator + fee addresses, live escrow balance, fee and pool caps, open/completed rounds, deposit & payout transactions, transaction log |
-| **Write** | exactly one switch: **Deposits Active / Paused** |
-| **Never** | upload/store/display a private key, seed phrase or `OPERATOR_KEYPAIR` · change the fee, the pool caps or the network · pick a winner, force a payout, settle a round by hand |
+| **Write** | the **Deposits Active / Paused** switch · the on-chain **fee** (`set_fee`, operator-signed) · off-chain soft limits (per-user, per-pool stake caps and tighter deposit min/max) · a **fee-wallet withdrawal** (only when `FEE_WALLET_KEYPAIR` is set) |
+| **Never** | upload/store/display a private key, seed phrase or `OPERATOR_KEYPAIR` · change the pool caps on chain or the network · pick a winner, force a payout, settle a round by hand |
+
+Off-chain limits are a **soft cap**: the program has no per-user limit and no
+instruction to change `max_deposit`/`tier_caps` (both are fixed at
+`initialize_config`), so the console can only *tighten* the deposit window and
+cap one wallet's stake per pool round in the API. It cannot widen either — an
+off-chain override beyond the on-chain bounds is rejected. The fee is the one
+lever that is genuinely on chain.
 
 Settlement (round closing, winner selection, the 98 %/2 % split, payouts and
 opening the next round) runs **automatically** in `apps/api/src/settlement.ts`.
@@ -65,11 +72,16 @@ secret, the admin token or any base58 secret key.
 | `GET /api/admin/rounds/:id` | one round with its participants and transactions |
 | `GET /api/admin/transactions?kind=&status=&limit=` | the PENDING → CONFIRMED \| FAILED ledger |
 | `GET /api/admin/logs?level=&limit=` | the redacted log ring buffer (500 entries, in-process) |
-| `POST /api/admin/deposits` | `{ "paused": true \| false }` — the only write |
+| `POST /api/admin/deposits` | `{ "paused": true \| false }` — the deposit kill switch |
+| `GET /api/admin/settings` | off-chain soft limits + live on-chain bounds + fee-wallet balance + withdrawal key state |
+| `PUT /api/admin/settings` | `{ userCapLamportsByTier?, minDepositLamports?, maxDepositLamports? }` — off-chain limits; may only tighten the on-chain window |
+| `POST /api/admin/fee` | `{ "feeBps": 0..3000 }` — operator-signed `set_fee` (chain mode only; affects rounds locked AFTER the change) |
+| `POST /api/admin/withdraw` | `{ "to": "<address>", "lamports": "<n>" }` — fee-wallet withdrawal (chain mode only; needs `FEE_WALLET_KEYPAIR`) |
 | `GET /api/admin/ping` | authenticated liveness probe |
 
 All of them require the token; `POST /api/admin/deposits` validates the body and
-ignores every other field.
+ignores every other field. The settings/fee/withdraw routes are described in
+§7.
 
 ## 4. The deposit kill switch
 
@@ -100,7 +112,8 @@ Set these on the **API** service (the one running `npm run dev:api` /
 | `PLATFORM_FEE_WALLET` | no | public address | receives the 2 % |
 | `PLATFORM_FEE_BPS` | no | `200` | 2 % |
 | `TIER_CAPS_SOL` | no | `1,10,100` | the three pool caps |
-| `MIN_DEPOSIT_LAMPORTS` / `MAX_DEPOSIT_LAMPORTS` | no | lamports | per-deposit limits |
+| `MIN_DEPOSIT_LAMPORTS` / `MAX_DEPOSIT_LAMPORTS` | no | lamports | per-deposit limits (boot default; the console can tighten them off-chain) |
+| `FEE_WALLET_KEYPAIR` | **yes** | JSON array of 64 numbers | the fee wallet's own keypair — enables `POST /api/admin/withdraw`. Unset ⇒ withdrawal stays disabled. DEVNET ONLY; must match `PLATFORM_FEE_WALLET` or the server refuses to send |
 | `SOLANA_NETWORK` | no | `devnet` | mainnet needs `ENABLE_MAINNET=true` as well |
 | `SOLANA_RPC_URL` | no | `https://api.devnet.solana.com` | |
 | `DATABASE_URL` | **yes** | `postgres://…` | audit mirror; also persists the kill switch |
@@ -173,3 +186,29 @@ dashboard; the keypair moves devnet SOL. Never paste a keypair into the console
 3. Check **Wallets & escrow**: `custodyReady: true` and a non-zero balance
    before you tell anyone the platform takes deposits.
 4. The console refreshes every 10 s; **Lock** clears the token from the tab.
+5. **Operator settings** (below the deposit ledger) holds the adjustable levers:
+   the on-chain **fee**, the off-chain **per-user pool caps** and **deposit
+   min/max**, the **fee-wallet balance**, and the **withdrawal** form.
+
+## 7. Operator settings & fee-wallet withdrawal
+
+| Lever | Where it lives | Notes |
+|---|---|---|
+| Platform fee | **on chain** (`set_fee`) | operator-signed; `≤ 3000` bps; only rounds locked *after* the change use it — never retroactive |
+| Max SOL per user per pool | **off chain** (API) | a per-lane soft cap on one wallet's stake per round; `0` disables it; cannot exceed the lane's on-chain pool cap |
+| Deposit min / max | **off chain** (API) | may only *tighten* the on-chain window; clearing the field falls back to the on-chain value |
+| Fee-wallet balance | read-only | live devnet balance of `PLATFORM_FEE_WALLET` |
+| Withdraw fee wallet | on chain (System transfer) | needs `FEE_WALLET_KEYPAIR`; the server checks the key against `PLATFORM_FEE_WALLET` before sending, so it can never move the wrong account |
+
+Off-chain settings persist in the audit mirror (`game_settings`) and are restored
+at boot, so a restart or redeploy does not silently reset an operator's limits.
+
+A withdrawal is a plain server-signed System transfer from the fee wallet to the
+address you enter. The fee wallet is a different account from the operator, so
+this is the only operation on the console that uses `FEE_WALLET_KEYPAIR` — the
+key is read from the environment at send time and is never stored or displayed.
+The server refuses a transfer larger than the wallet's balance minus a small
+(~5000 lamport) transaction-fee buffer, and refuses outright if the key does not
+match the configured fee wallet address. The console's **Max** button fills in
+exactly that withdrawable amount, so a full drain is one click and still passes
+the server's balance check.

@@ -113,12 +113,21 @@ node scripts/generate-operator-keypair.mjs   # prints JSON array; DEVNET ONLY
 `/admin` (token: `ADMIN_TOKEN`) shows devnet/mainnet status, RPC health, the
 escrow / operator / fee addresses, the live escrow balance, the 2% fee and the
 1/10/100 SOL caps, open and completed rounds, the deposit & payout ledger and the
-transaction log — plus one switch: **Deposits Active / Paused**.
+transaction log — plus the **Deposits Active / Paused** switch and an *Operator
+settings* panel.
 
-It cannot store or display a private key, a seed phrase or `OPERATOR_KEYPAIR`,
-cannot change fees/caps/network, and cannot settle anything by hand: the round
-lifecycle stays fully automatic. `docs/ADMIN.md` has the full endpoint list and
-the Render environment table.
+**Operator settings** lets the operator set the platform **fee** on chain
+(operator-signed `set_fee`, `≤ 3000` bps, never retroactive), tighten off-chain
+**per-user per-pool caps** and **deposit min/max** (soft caps in the API — the
+program has no instruction to change `max_deposit`/`tier_caps`, so these can only
+tighten the on-chain window, never widen it), see the live **fee-wallet
+balance**, and **withdraw from the fee wallet** once `FEE_WALLET_KEYPAIR` is set
+as a server secret.
+
+It still cannot store or display a private key, a seed phrase or
+`OPERATOR_KEYPAIR`, cannot change the pool caps on chain or the network, and
+cannot settle anything by hand: the round lifecycle stays fully automatic.
+`docs/ADMIN.md` has the full endpoint list and the Render environment table.
 
 ## Tests
 

@@ -114,7 +114,10 @@ export class TxLedger {
       network: input.network,
       depositAmountLamports: input.depositAmountLamports ?? null,
       depositSignature: null,
-      depositStatus: "PENDING",
+      // Status of the kind's own flow. A PAYOUT row is tracked by payoutStatus,
+      // so its depositStatus must stay null — leaving it "PENDING" made every
+      // payout row look like an un-reconciled DEPOSIT (see listStalePending).
+      depositStatus: input.kind === "DEPOSIT" ? "PENDING" : null,
       payoutAmountLamports: input.payoutAmountLamports ?? null,
       payoutSignature: null,
       payoutStatus: input.kind === "PAYOUT" ? "PENDING" : null,
@@ -303,6 +306,64 @@ export class TxLedger {
     return this.clone(tx);
   }
 
+  /**
+   * FAIL a CONFIRMED deposit whose entry no longer exists ON CHAIN.
+   *
+   * `CONFIRMED` is terminal everywhere else (see `settle`). The one direction
+   * that has to yield is a PHANTOM row: the ledger holds a CONFIRMED deposit
+   * while the round records no matching participant. That happens when the
+   * audit mirror restores rows written by another deployment (or another
+   * program state) into a round id the chain has since re-created, or when a
+   * round was cancelled and its participants were refunded. Left CONFIRMED,
+   * such a row locks a wallet out of a round it never entered (the
+   * `already_deposited` gate reads `getConfirmedDeposit`) and counts lamports
+   * that are not in the on-chain pot (`confirmedPotLamports` feeds the payout).
+   * The chain decides money, so the row is moved out of the way instead.
+   *
+   * Only reconciliation paths may call this — the deposit gate after the chain
+   * proved there is no participant, and the cancel path after the participants
+   * were refunded. It never moves money.
+   */
+  orphanConfirmedDeposit(id: string, reason: string): ChainTx {
+    const tx = this.require(id);
+    if (tx.depositStatus !== "CONFIRMED") return this.clone(tx);
+    tx.depositStatus = "FAILED";
+    tx.lastError = reason.slice(0, 300);
+    tx.nextRetryAt = null;
+    tx.updatedAt = new Date();
+    this.persist(tx);
+    txLog.warn("tx.deposit_orphaned", {
+      kind: tx.kind,
+      id: tx.id,
+      roundId: tx.roundId,
+      wallet: tx.wallet,
+      network: tx.network,
+      amountLamports: tx.depositAmountLamports,
+      signature: tx.depositSignature,
+      status: "FAILED",
+      error: tx.lastError,
+    });
+    return this.clone(tx);
+  }
+
+  /**
+   * Orphan every CONFIRMED deposit a round holds. Called right after a round is
+   * CANCELLED: the program refunded every participant exactly on chain, so those
+   * ledger rows must stop counting as entries (or as pot) for that round.
+   * Returns how many rows were moved.
+   */
+  orphanConfirmedDepositsOfRound(roundId: string | bigint, reason: string): number {
+    const id = roundId.toString();
+    let moved = 0;
+    for (const tx of [...this.byId.values()]) {
+      if (tx.kind !== "DEPOSIT" || tx.roundId !== id) continue;
+      if (tx.depositStatus !== "CONFIRMED") continue;
+      this.orphanConfirmedDeposit(tx.id, reason);
+      moved += 1;
+    }
+    return moved;
+  }
+
   // ------------------------------------------------------------------
   // queries
   // ------------------------------------------------------------------
@@ -463,11 +524,26 @@ export class TxLedger {
     return { deposits, payouts, total };
   }
 
-  /** PENDING records older than `ageMs` — the reconciler's work queue. */
+  /**
+   * PENDING DEPOSIT records older than `ageMs` — the reconciler's work queue.
+   *
+   * The kind filter is load-bearing: only DEPOSIT rows have a depositStatus
+   * (PAYOUT rows are tracked by payoutStatus and their depositStatus is null
+   * for new rows / "PENDING" for rows persisted before that field was scoped
+   * correctly). Without it, a payout row inherits a forever-"PENDING"
+   * depositStatus and is fed to the deposit reconciler every cycle, which
+   * rejects it as `wrong_tx_kind` and never marks it terminal — an endless
+   * `deposit.reconciled {checked:1, confirmed:0, failed:1}` loop.
+   */
   listStalePending(ageMs: number): ChainTx[] {
     const cutoff = Date.now() - ageMs;
     return [...this.byId.values()]
-      .filter((t) => t.depositStatus === "PENDING" && t.createdAt.getTime() <= cutoff)
+      .filter(
+        (t) =>
+          t.kind === "DEPOSIT" &&
+          t.depositStatus === "PENDING" &&
+          t.createdAt.getTime() <= cutoff
+      )
       .map((t) => this.clone(t));
   }
 

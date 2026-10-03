@@ -45,6 +45,7 @@ export function useSse(onEvent: (ev: SseMessage) => void) {
       "new_round",
       "tx",
       "config",
+      "chat",
     ];
     for (const t of types) source.addEventListener(t, forward as EventListener);
     return () => {

@@ -114,6 +114,27 @@ pub mod roulette {
         Ok(())
     }
 
+    /// Operator-only treasury (platform fee wallet) update. Devnet ops tool:
+    /// the treasury is otherwise frozen at `initialize_config`, so moving the
+    /// fee recipient would require a full re-deploy + re-seed — changing the
+    /// program address and orphaning every existing PDA.
+    ///
+    /// Same trust root as `set_fee`: the signer must equal the stored operator
+    /// (the key that was the upgrade authority here). Only FUTURE payouts are
+    /// affected — `pay_winners` reads `config.treasury` at call time, so any
+    /// round already settled or paid keeps exactly what it recorded, and fees
+    /// already received are never moved. Never retroactive.
+    pub fn set_treasury(ctx: Context<SetTreasury>, treasury: Pubkey) -> Result<()> {
+        let config = &mut ctx.accounts.config;
+        require!(
+            ctx.accounts.operator.key() == config.operator,
+            RouletteError::InvalidOperator
+        );
+        require!(treasury != Pubkey::default(), RouletteError::InvalidTreasuryAddress);
+        config.treasury = treasury;
+        Ok(())
+    }
+
     /// Operator opens round `args.round_id` (= counter + 1, enforced) in pool
     /// lane `args.tier` (0=1 SOL, 1=10 SOL, 2=100 SOL). The tier fixes the
     /// round's pool cap for its whole lifetime.

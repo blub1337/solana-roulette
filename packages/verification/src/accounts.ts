@@ -101,6 +101,19 @@ export interface RoundData {
    * node — it has to be read from the Round account.
    */
   revealInput: Uint8Array;
+  /**
+   * True when the on-chain account predates the `reveal_input` field that was
+   * APPENDED to the `Round` struct (account space < `ROUND_SPACE`). Such an
+   * account still DECODES here — so history and verification keep working —
+   * but the deployed program cannot deserialize it at all: `deposit`, `lock`
+   * and `settle` all revert with AnchorError 3003 (AccountDidNotDeserialize).
+   *
+   * A lane pinned to a legacy head therefore rejects EVERY deposit, which is
+   * exactly the "cannot join this pool" failure. The settlement driver treats
+   * a legacy head as absent and opens a fresh, current-layout round instead.
+   * Absent (undefined) for rounds this process built itself (the local ledger).
+   */
+  legacy?: boolean;
 }
 
 export interface ParticipantData {
@@ -231,6 +244,9 @@ export function decodeRound(data: Uint8Array): RoundData {
     tier,
     bump,
     revealInput,
+    // The deployed program's deserializer needs the FULL current layout: a
+    // shorter (pre-`reveal_input`) account can never be operated on.
+    legacy: data.length < ROUND_SPACE,
   };
 }
 

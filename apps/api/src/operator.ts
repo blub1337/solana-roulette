@@ -269,6 +269,12 @@ function u8le(v: number): Buffer {
   return Buffer.from([v & 0xff]);
 }
 
+function u16le(v: number): Buffer {
+  const b = Buffer.alloc(2);
+  b.writeUInt16LE(v & 0xffff);
+  return b;
+}
+
 /** Pool lane for create_round (validated against the on-chain tier caps). */
 function tierOf(args: { tier?: number }): number {
   const t = args.tier ?? 0;
@@ -310,4 +316,96 @@ export async function nextRoundId(connection: Connection, programId: PublicKey):
   const cfg = await fetchOnChainConfig(connection, programId);
   const counter = cfg?.roundCounter ?? 0n;
   return counter + 1n;
+}
+
+/**
+ * Operator-only on-chain fee update (`set_fee`, capped at 3000 bps by the
+ * program). The fee only affects rounds locked AFTER the change, so this is
+ * never retroactive. Signs with the configured operator and re-reads the config
+ * to confirm the new value actually landed. Throws with a human message on any
+ * guard failure — the caller maps it to an HTTP status.
+ */
+export async function buildAndSendSetFeeTx(args: {
+  connection: Connection;
+  programId: PublicKey;
+  cfg: { network: string; mainnetEnabled: boolean; operatorKeypairJson?: string };
+  feeBps: number;
+}): Promise<{ signature: string; feeBps: number }> {
+  const { connection, programId, cfg } = args;
+  if (cfg.network === "mainnet-beta" && !cfg.mainnetEnabled) {
+    throw new Error("mainnet is gated (ENABLE_MAINNET=true required)");
+  }
+  if (!Number.isInteger(args.feeBps) || args.feeBps < 0 || args.feeBps > 3000) {
+    throw new Error(`fee_bps must be an integer in [0, 3000], got ${args.feeBps}`);
+  }
+  const operator = loadOperatorKeypair(cfg.operatorKeypairJson);
+  if (!operator) throw new Error("OPERATOR_KEYPAIR is not configured on this server");
+  const onChain = await fetchOnChainConfig(connection, programId);
+  if (!onChain) throw new Error("on-chain config not found — is the program deployed?");
+  if (!onChain.operator.equals(operator.publicKey)) {
+    throw new Error("this server's OPERATOR_KEYPAIR is not the on-chain config operator");
+  }
+
+  const [configPda] = getGlobalConfigPda(programId);
+  const ix = new TransactionInstruction({
+    programId,
+    keys: [
+      { pubkey: configPda, isSigner: false, isWritable: true },
+      // The program requires signer == config.operator.
+      { pubkey: operator.publicKey, isSigner: true, isWritable: true },
+      { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data: disc("set_fee", u16le(args.feeBps)),
+  });
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+  const tx = new Transaction({ feePayer: operator.publicKey, blockhash, lastValidBlockHeight }).add(ix);
+  const signature = await sendAndConfirm(connection, tx, operator);
+
+  const after = await fetchOnChainConfig(connection, programId);
+  if (!after || after.feeBps !== args.feeBps) {
+    throw new Error(`fee update not verified on chain (wanted ${args.feeBps}, read ${after?.feeBps ?? "none"})`);
+  }
+  return { signature, feeBps: after.feeBps };
+}
+
+/** Live lamport balance of the configured platform fee wallet. */
+export async function feeWalletBalance(connection: Connection, cfg: FeeWalletSource): Promise<bigint> {
+  const wallet = requireFeeWallet(cfg);
+  return BigInt(await connection.getBalance(wallet, "confirmed"));
+}
+
+/**
+ * Withdraw SOL from the platform fee wallet.
+ *
+ * The fee wallet is a SEPARATE wallet from the operator; the server can only
+ * sign for it when its keypair is provided as `FEE_WALLET_KEYPAIR`. The key is
+ * validated against the configured fee wallet address before anything is sent,
+ * so a mis-set secret can never move funds from the wrong account.
+ */
+export async function withdrawFeeWallet(args: {
+  connection: Connection;
+  cfg: FeeWalletSource;
+  feeWalletKeypairJson: string | undefined;
+  to: PublicKey;
+  lamports: bigint;
+}): Promise<{ signature: string; from: string; to: string; lamports: string }> {
+  const { connection, to, lamports } = args;
+  if (lamports <= 0n) throw new Error("amount must be greater than 0");
+  const feeWallet = requireFeeWallet(args.cfg);
+  const key = loadOperatorKeypair(args.feeWalletKeypairJson);
+  if (!key) throw new Error("FEE_WALLET_KEYPAIR is not set on this server");
+  if (!key.publicKey.equals(feeWallet)) {
+    throw new Error("FEE_WALLET_KEYPAIR does not match the configured PLATFORM_FEE_WALLET");
+  }
+  const balance = BigInt(await connection.getBalance(feeWallet, "confirmed"));
+  const FEE_BUFFER = 5_000n; // a system transfer costs ~5000 lamports
+  if (lamports + FEE_BUFFER > balance) {
+    throw new Error(`fee wallet holds ${balance} lamports — not enough for ${lamports}`);
+  }
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+  const tx = new Transaction({ feePayer: feeWallet, blockhash, lastValidBlockHeight }).add(
+    SystemProgram.transfer({ fromPubkey: feeWallet, toPubkey: to, lamports: Number(lamports) })
+  );
+  const signature = await sendAndConfirmTransaction(connection, tx, [key], { commitment: "confirmed" });
+  return { signature, from: feeWallet.toBase58(), to: to.toBase58(), lamports: lamports.toString() };
 }

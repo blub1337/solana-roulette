@@ -4,7 +4,7 @@
  * These tests drive the whole lifecycle against a fake RPC — intent, wallet
  * signature, server-side verification, crediting, rejection and reconciliation.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { Keypair, PublicKey, type Connection, type ParsedTransactionWithMeta } from "@solana/web3.js";
 import { resolveConfig } from "@solana-roulette/config";
 import type { ChainBackend } from "./backend.js";
@@ -14,6 +14,7 @@ import { cancelDeposit, confirmDeposit, createDepositIntent, reconcilePendingDep
 import { LocalLedgerError } from "./localLedger.js";
 import { resolveCustody, type Custody } from "./custody.js";
 import { depositMessage } from "@solana-roulette/types";
+import { applyGameSettingsInput, resetGameSettingsForTests, type SettingsBounds } from "./adminSettings.js";
 
 const ESCROW = new PublicKey("4Zx2cvqL8xwGV4Y5hcEXysbJCmyiYDRBgBHdidWWvkMp");
 const FEE_WALLET = new PublicKey("6B9MXLX4tgbHB9eXheHqK6FmPXCwxYP7No51NqRQHAaR");
@@ -92,8 +93,26 @@ interface HarnessOptions {
   /** What the devnet RPC returns for getParsedTransaction. */
   tx?: ParsedTransactionWithMeta | null;
   escrowBalance?: bigint;
+  /**
+   * What the runtime reports as the round's on-chain participants. The deposit
+   * gate treats this as authoritative for "already deposited" — a wallet is
+   * only blocked when it appears here.
+   */
+  participants?: ParticipantData[];
   /** Awaited inside getParsedTransaction, to orchestrate concurrent callers. */
   beforeVerify?: () => Promise<void>;
+}
+
+/** The on-chain Participant record the round would hold for a real deposit. */
+function participant(round: RoundData, wallet: PublicKey, amount: bigint): ParticipantData {
+  return {
+    round: PublicKey.default,
+    wallet,
+    amount,
+    weightStart: round.totalWeight,
+    index: round.participantCount,
+    bump: 255,
+  };
 }
 
 function harness(opts: HarnessOptions) {
@@ -108,7 +127,7 @@ function harness(opts: HarnessOptions) {
       return round;
     },
     async getParticipants(): Promise<ParticipantData[]> {
-      return [];
+      return opts.participants ?? [];
     },
     async getGlobalConfig(): Promise<GlobalConfigData | null> {
       return null;
@@ -178,6 +197,10 @@ function nextCase(): { roundId: bigint; seed: number } {
   return { roundId: BigInt(caseCounter), seed: (caseCounter % 250) + 1 };
 }
 
+// Off-chain settings are a process-wide singleton: reset before every case so a
+// cap set in one test can never leak into the deposit/verification suites.
+beforeEach(() => resetGameSettingsForTests());
+
 describe("deposit intent", () => {
   it("opens a PENDING record naming the devnet escrow", async () => {
     const { roundId, seed } = nextCase();
@@ -204,10 +227,16 @@ describe("deposit intent", () => {
     expect(b.depositId).toBe(a.depositId);
   });
 
-  it("refuses a second entry for a wallet that is already confirmed", async () => {
+  it("refuses a second entry for a wallet that is REALLY on chain in the round", async () => {
     const { roundId, seed } = nextCase();
     const wallet = player(seed);
-    const { deps } = harness({ roundId, round: { participantCount: 1 } });
+    const round = { participantCount: 1 };
+    const { deps } = harness({
+      roundId,
+      round,
+      // The chain — not the ledger — is what confirms the entry is real.
+      participants: [participant(makeRound({ id: roundId, ...round }), wallet.publicKey, 1000n)],
+    });
     const { tx } = store.txs.begin({
       kind: "DEPOSIT",
       idempotencyKey: `deposit:${roundId.toString()}:${wallet.publicKey.toBase58()}`,
@@ -222,6 +251,69 @@ describe("deposit intent", () => {
     await expect(
       createDepositIntent(deps, { roundId, wallet: wallet.publicKey, amountLamports: 100_000_000n })
     ).rejects.toMatchObject({ code: "already_deposited" });
+  });
+
+  it("does NOT block a wallet on a PHANTOM confirmed row the chain does not back", async () => {
+    // A CONFIRMED ledger row restored from another deployment's mirror (or a
+    // cancelled round) while the round records ZERO participants: the row must
+    // not lock the wallet out of a round it never entered.
+    const { roundId, seed } = nextCase();
+    const wallet = player(seed);
+    const { deps } = harness({ roundId, round: { participantCount: 0 } });
+    const { tx } = store.txs.begin({
+      kind: "DEPOSIT",
+      idempotencyKey: `deposit:${roundId.toString()}:${wallet.publicKey.toBase58()}`,
+      roundId: roundId.toString(),
+      tier: 0,
+      wallet: wallet.publicKey.toBase58(),
+      recipient: ESCROW.toBase58(),
+      network: "devnet",
+      depositAmountLamports: "100000000",
+    });
+    store.txs.settle(tx.id, "CONFIRMED", { signature: "p".repeat(64) });
+    expect(store.txs.confirmedPotLamports(roundId)).toBe(100_000_000n);
+
+    const intent = await createDepositIntent(deps, {
+      roundId,
+      wallet: wallet.publicKey,
+      amountLamports: 100_000_000n,
+    });
+    expect(intent.status).toBe("PENDING");
+    // The phantom row was moved out of the way: no longer CONFIRMED, no longer
+    // counted as pot, and the wallet is free to deposit for real.
+    expect(store.txs.get(tx.id)?.depositStatus).toBe("FAILED");
+    expect(store.txs.confirmedPotLamports(roundId)).toBe(0n);
+    expect(store.txs.getConfirmedDeposit(roundId, wallet.publicKey.toBase58())).toBeNull();
+  });
+
+  it("does NOT block a wallet whose confirmed row the round no longer lists", async () => {
+    // Non-empty round, but this wallet is not among its on-chain participants.
+    const { roundId, seed } = nextCase();
+    const wallet = player(seed);
+    const other = player(seed + 1);
+    const { deps } = harness({
+      roundId,
+      round: { participantCount: 1 },
+      participants: [participant(makeRound({ id: roundId }), other.publicKey, 1000n)],
+    });
+    const { tx } = store.txs.begin({
+      kind: "DEPOSIT",
+      idempotencyKey: `deposit:${roundId.toString()}:${wallet.publicKey.toBase58()}`,
+      roundId: roundId.toString(),
+      tier: 0,
+      wallet: wallet.publicKey.toBase58(),
+      recipient: ESCROW.toBase58(),
+      network: "devnet",
+      depositAmountLamports: "1000",
+    });
+    store.txs.settle(tx.id, "CONFIRMED", { signature: "q".repeat(64) });
+    const intent = await createDepositIntent(deps, {
+      roundId,
+      wallet: wallet.publicKey,
+      amountLamports: 100_000_000n,
+    });
+    expect(intent.status).toBe("PENDING");
+    expect(store.txs.get(tx.id)?.depositStatus).toBe("FAILED");
   });
 
   it("refuses amounts that would break the tier cap", async () => {
@@ -456,6 +548,29 @@ describe("rejected signatures and the reconciler", () => {
     expect(credited).toEqual([]);
     expect(store.txs.confirmedPotLamports(roundId)).toBe(0n);
   });
+
+  it("a PAYOUT row is never a reconciliation candidate, so it cannot loop forever", async () => {
+    const { roundId, seed } = nextCase();
+    const { deps } = harness({ roundId });
+    const wallet = player(seed).publicKey.toBase58();
+    const { tx } = store.txs.begin({
+      kind: "PAYOUT",
+      idempotencyKey: `payout:${roundId.toString()}:1`,
+      roundId: roundId.toString(),
+      tier: 0,
+      wallet,
+      recipient: wallet,
+      network: "devnet",
+      payoutAmountLamports: "925",
+      feeLamports: "75",
+    });
+    // The queue the reconciler draws from must not contain a payout.
+    expect(store.txs.listStalePending(0).some((t) => t.id === tx.id)).toBe(false);
+    await reconcilePendingDeposits(deps, 0);
+    // Untouched by reconciliation: still a pending payout, still not a deposit.
+    expect(store.txs.get(tx.id)?.payoutStatus).toBe("PENDING");
+    expect(store.txs.get(tx.id)?.depositStatus).toBeNull();
+  });
 });
 
 describe("custody", () => {
@@ -521,6 +636,58 @@ describe("custody", () => {
     expect(custody.reason).toMatch(/DEPOSIT_ESCROW_WALLET must be the public address/);
     expect(custody.escrow?.toBase58()).toBe(stranger.publicKey.toBase58());
     expect(custody.signerAddress).toBe(operator.publicKey.toBase58());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Off-chain operator limits (soft): the API tightens the deposit window and
+// caps one wallet's stake per pool round WITHOUT touching the program. The
+// on-chain bounds are the ones the operator console validates against.
+// ---------------------------------------------------------------------------
+const OPERATOR_BOUNDS: SettingsBounds = {
+  onChainMinDepositLamports: 1_000_000n,
+  onChainMaxDepositLamports: 1_000_000_000n,
+  tierCapsLamports: [1_000_000_000n, 10_000_000_000n, 100_000_000_000n],
+};
+
+describe("off-chain operator limits at deposit intent", () => {
+  it("rejects a deposit below the operator's off-chain minimum", async () => {
+    const { roundId, seed } = nextCase();
+    const { deps } = harness({ roundId });
+    applyGameSettingsInput({ minDepositLamports: "500000000" }, OPERATOR_BOUNDS);
+    await expect(
+      createDepositIntent(deps, { roundId, wallet: player(seed).publicKey, amountLamports: 100_000_000n })
+    ).rejects.toMatchObject({ code: "DepositTooSmall" });
+  });
+
+  it("rejects a deposit above the operator's off-chain maximum", async () => {
+    const { roundId, seed } = nextCase();
+    const { deps } = harness({ roundId });
+    applyGameSettingsInput({ maxDepositLamports: "50000000" }, OPERATOR_BOUNDS);
+    await expect(
+      createDepositIntent(deps, { roundId, wallet: player(seed).publicKey, amountLamports: 100_000_000n })
+    ).rejects.toMatchObject({ code: "DepositTooLarge" });
+  });
+
+  it("rejects a stake above the per-user, per-pool soft cap for its lane", async () => {
+    const { roundId, seed } = nextCase();
+    const { deps } = harness({ roundId, round: { tier: 0 } });
+    applyGameSettingsInput({ userCapLamportsByTier: ["20000000", "0", "0"] }, OPERATOR_BOUNDS);
+    await expect(
+      createDepositIntent(deps, { roundId, wallet: player(seed).publicKey, amountLamports: 100_000_000n })
+    ).rejects.toMatchObject({ code: "UserCapExceeded" });
+  });
+
+  it("accepts a stake at or below the per-user cap", async () => {
+    const { roundId, seed } = nextCase();
+    const { deps } = harness({ roundId, round: { tier: 0 } });
+    applyGameSettingsInput({ userCapLamportsByTier: ["200000000", "0", "0"] }, OPERATOR_BOUNDS);
+    const intent = await createDepositIntent(deps, {
+      roundId,
+      wallet: player(seed).publicKey,
+      amountLamports: 100_000_000n,
+    });
+    expect(intent.status).toBe("PENDING");
   });
 });
 

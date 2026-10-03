@@ -152,6 +152,16 @@ pub struct SetFee<'info> {
 }
 
 #[derive(Accounts)]
+pub struct SetTreasury<'info> {
+    #[account(mut, seeds = [CONFIG_SEED], bump)]
+    pub config: Account<'info, GlobalConfig>,
+    /// The ONLY key allowed to move the fee recipient: the stored operator.
+    #[account(mut)]
+    pub operator: Signer<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
 pub struct CreateRound<'info> {
     /// Validated against config PDA seeds in lib.rs (owner + bump re-derivation).
     /// CHECK: manual PDA validation in lib.rs.

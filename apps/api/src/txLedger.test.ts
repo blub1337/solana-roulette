@@ -209,6 +209,80 @@ describe("backoff + queues", () => {
 });
 
 /**
+ * Regression: payout rows must never enter the DEPOSIT reconciler queue.
+ *
+ * `begin` used to stamp `depositStatus: "PENDING"` on every kind, and
+ * `listStalePending` filtered on `depositStatus` alone. A PAYOUT row therefore
+ * looked like an un-reconciled deposit forever: `confirmDeposit` rejected it as
+ * `wrong_tx_kind`, the loop never marked it terminal, and the API logged
+ * `deposit.reconciled {checked:1, confirmed:0, failed:1}` every few seconds for
+ * the life of the process (and again after each restart, because `restore`
+ * re-admits the same row from the audit mirror).
+ */
+describe("payout rows never leak into the deposit reconciler queue", () => {
+  function pendingPayout(ledger: TxLedger, attempt = 1): string {
+    return ledger.begin({
+      kind: "PAYOUT",
+      idempotencyKey: payoutKey("5", attempt),
+      roundId: "5",
+      tier: 0,
+      wallet: WINNER,
+      recipient: WINNER,
+      network: "devnet",
+      payoutAmountLamports: "925",
+      feeLamports: "75",
+    }).tx.id;
+  }
+
+  it("scopes depositStatus to DEPOSIT rows", () => {
+    const ledger = new TxLedger();
+    const payout = ledger.get(pendingPayout(ledger))!;
+    expect(payout.depositStatus).toBeNull();
+    expect(payout.payoutStatus).toBe("PENDING");
+  });
+
+  it("queues a pending DEPOSIT but never a pending PAYOUT", () => {
+    const ledger = new TxLedger();
+    pendingPayout(ledger);
+    expect(ledger.listStalePending(0)).toEqual([]);
+    const d = deposit(ledger, "1", WALLET).tx;
+    expect(ledger.listStalePending(0).map((t) => t.id)).toEqual([d.id]);
+  });
+
+  it("ignores a legacy PAYOUT row mirrored with depositStatus PENDING", () => {
+    const ledger = new TxLedger();
+    const now = new Date();
+    ledger.restore([
+      {
+        id: "legacy-payout",
+        idempotencyKey: payoutKey("7", 1),
+        kind: "PAYOUT",
+        roundId: "7",
+        tier: 0,
+        wallet: WINNER,
+        recipient: WINNER,
+        network: "devnet",
+        depositAmountLamports: null,
+        depositSignature: SIG_A,
+        // The pre-fix persisted shape that caused the endless loop.
+        depositStatus: "PENDING",
+        payoutAmountLamports: "925",
+        payoutSignature: SIG_A,
+        payoutStatus: "CONFIRMED",
+        feeLamports: "75",
+        attempts: 1,
+        lastError: null,
+        createdAt: new Date(now.getTime() - 60_000),
+        updatedAt: now,
+        confirmedAt: now,
+        nextRetryAt: null,
+      },
+    ]);
+    expect(ledger.listStalePending(0)).toEqual([]);
+  });
+});
+
+/**
  * Restart safety.
  *
  * The ledger is in memory and the audit mirror is write-through, so the guards

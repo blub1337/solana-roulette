@@ -7,6 +7,8 @@ import {
   getEscrowPda,
   verifyRoundData,
   deriveRandomness,
+  decodeRound,
+  type RoundData,
 } from "@solana-roulette/verification";
 import type { SseEvent, Tier } from "@solana-roulette/types";
 import { TIER_COUNT, TIER_META, tierFromParam, depositMessage } from "@solana-roulette/types";
@@ -44,6 +46,15 @@ function roundIdFromParams(params: unknown): bigint | null {
   const id = (params as { id?: string }).id;
   if (!id || !/^\d+$/.test(id)) return null;
   return BigInt(id);
+}
+
+/** Bounded integer env knob with a safe fallback (matches history.ts). */
+function intEnv(name: string, fallback: number, min: number, max: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < min || n > max) return fallback;
+  return n;
 }
 
 export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
@@ -97,15 +108,64 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
   });
 
   // ---------- the three independent pool lanes (live) ----------
+  /**
+   * `/api/pools` is polled by every open dashboard. Resolving each lane's last
+   * completed round used to cost one RPC read per candidate id — up to ~150
+   * single `getAccountInfo` calls per request. On the public devnet RPC that
+   * burst is exactly what gets rate-limited (HTTP 429 "Connection rate limits
+   * exceeded"), which used to turn the whole route into a 500 and flood the
+   * log. Two changes fix it:
+   *
+   *   1. every lane's candidate ids are read in ONE batched
+   *      `getMultipleAccountsInfo` call instead of ~150 single reads;
+   *   2. the assembled payload is memoised briefly, so concurrent pollers share
+   *      a single chain read.
+   *
+   * A transient RPC failure degrades to the last good payload and logs one
+   * warning — it never 500s and never spams the log.
+   *
+   * The lane scan window (how far back a completed round is looked up) matches
+   * the previous behaviour: 50 ids back from that lane's head.
+   */
+  const poolsTtlMs = intEnv("POOLS_CACHE_TTL_MS", 4_000, 0, 60_000);
+  let poolsCache: { at: number; body: { pools: Array<Record<string, unknown>> } } | null = null;
+
   app.get("/api/pools", async () => {
+    if (poolsCache && Date.now() - poolsCache.at < poolsTtlMs) return poolsCache.body;
+    try {
+      const body = await buildPools();
+      if (poolsTtlMs > 0) poolsCache = { at: Date.now(), body };
+      return body;
+    } catch (err) {
+      txLog.warn("pools.read_failed", {
+        error: err instanceof Error ? err.message : String(err),
+        detail: "serving the last good /api/pools payload",
+      });
+      if (poolsCache) return poolsCache.body;
+      throw err;
+    }
+  });
+
+  async function buildPools(): Promise<{ pools: Array<Record<string, unknown>> }> {
     const heads = await backend.getHeadByTier();
+    const headOf = (tier: number) =>
+      heads[tier] && heads[tier]! > 0n ? heads[tier]! : BigInt(tier + 1);
+
+    // Union of the ids every lane needs, so all three lanes cost one read.
+    const ids = new Set<string>();
+    for (let tier = 0; tier < TIER_COUNT; tier++) {
+      const head = headOf(tier);
+      for (let id = head; id > head - 50n && id >= 1n; id--) ids.add(id.toString());
+    }
+    const rounds = await readRoundWindow([...ids].map((s) => BigInt(s)));
+
     const pools: Array<Record<string, unknown>> = [];
     for (let tier = 0; tier < TIER_COUNT; tier++) {
-      const head = heads[tier] && heads[tier]! > 0n ? heads[tier]! : BigInt(tier + 1);
-      const round = await backend.getRound(head);
+      const head = headOf(tier);
+      const round = rounds.get(head.toString()) ?? null;
       const meta = TIER_META[tier as Tier];
       const cap = tierCapLamports(cfg, tier);
-      const last = await findLastCompletedRound(tier, head);
+      const last = lastCompletedInWindow(rounds, tier, head);
       // A settling round's own result wins; otherwise show the previous round
       // so the last winner/payout stay visible once the next round opens.
       const settled = round && round.status === "COMPLETED" ? round : null;
@@ -122,7 +182,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         lastPayoutLamports: shown ? shown.payoutLamports.toString() : null,
         lastFeeLamports: shown ? shown.feeLamports.toString() : null,
       };
-      if (!round || isTerminalState(round.status)) {
+      if (!round || round.legacy || isTerminalState(round.status)) {
         pools.push({
           ...base,
           roundId: null,
@@ -157,12 +217,50 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
       });
     }
     return { pools };
-  });
+  }
 
-  /** Newest completed round in a tier lane (bounded scan back from head). */
-  async function findLastCompletedRound(tier: number, head: bigint) {
-    for (let id = head; id > head - 50n && id >= 1n; id--) {
+  /**
+   * Read a set of round ids in as few RPC calls as possible. Chain mode batches
+   * through `getMultipleAccountsInfo` (the same approach as history.ts, which
+   * exists precisely to avoid getting rate-limited at boot); local mode is an
+   * in-memory Map and goes through the backend. A single undecodable or missing
+   * account is skipped, never fatal.
+   */
+  async function readRoundWindow(ids: bigint[]): Promise<Map<string, RoundData>> {
+    const out = new Map<string, RoundData>();
+    if (backend.mode === "chain" && ids.length > 0) {
+      const CHUNK = 100; // Solana RPC caps a batch at 100 accounts
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const chunk = ids.slice(i, i + CHUNK);
+        const keys = chunk.map((id) => getRoundPda(programId, id)[0]);
+        const infos = await connection.getMultipleAccountsInfo(keys);
+        chunk.forEach((id, idx) => {
+          const info = infos[idx];
+          if (!info?.data) return;
+          try {
+            out.set(id.toString(), decodeRound(info.data));
+          } catch {
+            // A malformed/legacy account is simply not part of the window.
+          }
+        });
+      }
+      return out;
+    }
+    for (const id of ids) {
       const r = await backend.getRound(id);
+      if (r) out.set(id.toString(), r);
+    }
+    return out;
+  }
+
+  /** Newest completed round of a lane, from an already-read window. */
+  function lastCompletedInWindow(
+    rounds: Map<string, RoundData>,
+    tier: number,
+    head: bigint
+  ): RoundData | null {
+    for (let id = head; id > head - 50n && id >= 1n; id--) {
+      const r = rounds.get(id.toString());
       if (r && r.tier === tier && isTerminalState(r.status)) return r;
     }
     return null;
@@ -185,7 +283,10 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
 
   async function roundWithEntries(id: bigint) {
     const round = await backend.getRound(id);
-    if (!round) return { round: null, entries: [] };
+    // A legacy (pre-`reveal_input`) round cannot be deposited into: the
+    // deployed program reverts with AccountDidNotDeserialize. Report it as
+    // "no current round" so the lane reads as opening, never as depositable.
+    if (!round || round.legacy) return { round: null, entries: [] };
     const participants = await backend.getParticipants(round.id);
     return {
       round: roundToDto(round, cfg),

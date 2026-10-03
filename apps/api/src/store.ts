@@ -55,6 +55,56 @@ export class Store {
    */
   currentRoundIdByTier: bigint[] = Array.from({ length: TIER_COUNT }, (_, t) => BigInt(t + 1));
 
+  /**
+   * First time the settlement driver observed a round as OPEN (epoch ms).
+   *
+   * An OPEN round only leaves OPEN by reaching exactly its tier cap, so a
+   * quiet lane can sit OPEN forever and every participant is then locked out
+   * of that lane (one entry per wallet per round). The driver uses this clock
+   * to cancel a never-filling round after `ROUND_TIMEOUT_MS` and reopen the
+   * lane. In-memory on purpose: a restart simply re-arms the timer, and the
+   * operator can always force-advance a lane from the admin console.
+   */
+  private openSeenAt = new Map<string, number>();
+
+  /** Record (once) when a round was first seen OPEN; returns the stored time. */
+  markOpenSeen(roundId: string | bigint, at: number = Date.now()): number {
+    const id = roundId.toString();
+    const existing = this.openSeenAt.get(id);
+    if (existing !== undefined) return existing;
+    this.openSeenAt.set(id, at);
+    return at;
+  }
+
+  /** When the round was first seen OPEN, or null when never observed. */
+  openSeenAtFor(roundId: string | bigint): number | null {
+    return this.openSeenAt.get(roundId.toString()) ?? null;
+  }
+
+  /** Forget a round's open clock (it left OPEN, or the timer is re-armed). */
+  clearOpenSeen(roundId: string | bigint): void {
+    this.openSeenAt.delete(roundId.toString());
+  }
+
+  /**
+   * Overwrite one lane's head (lane rehydration after a restart).
+   *
+   * Guarded because heads decide where the settlement driver looks and where
+   * every pool read starts: a NaN, negative or out-of-lane value would corrupt
+   * the whole lane scan, so it is rejected rather than stored. An id below the
+   * boot default (1/2/3) is also refused — heads only ever move forward.
+   *
+   * Returns true when the value was written (so callers can report whether the
+   * chain actually moved a lane or it is still sitting at the boot default).
+   */
+  setLaneHead(tier: number, head: bigint): boolean {
+    if (!Number.isInteger(tier) || tier < 0 || tier >= this.currentRoundIdByTier.length) return false;
+    if (head < BigInt(tier + 1)) return false; // never below the boot default
+    if (this.currentRoundIdByTier[tier] === head) return true; // already correct
+    this.currentRoundIdByTier[tier] = head;
+    return true;
+  }
+
   // ------------------------------------------------------------------
   // SSE fan-out
   // ------------------------------------------------------------------
@@ -371,12 +421,25 @@ export class PostgresMirror {
             `INSERT INTO failures (scope, error, at) VALUES ($1,$2,$3)`,
             [j.row.scope, j.row.error, j.row.at]
           );
+        } else if (j.table === "chat_messages") {
+          await client.query(
+            `INSERT INTO chat_messages (id, wallet, page, text, created_at) VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (id) DO NOTHING`,
+            [j.row.id, j.row.wallet, j.row.page, j.row.text, j.row.createdAt]
+          );
         } else if (j.table === "admin_state") {
           await client.query(
             `INSERT INTO admin_state (id, deposits, updated_at)
              VALUES ('global', $1, now())
              ON CONFLICT (id) DO UPDATE SET deposits = EXCLUDED.deposits, updated_at = now()`,
             [j.row.deposits]
+          );
+        } else if (j.table === "game_settings") {
+          await client.query(
+            `INSERT INTO game_settings (id, json, updated_at)
+             VALUES ('global', $1, now())
+             ON CONFLICT (id) DO UPDATE SET json = EXCLUDED.json, updated_at = now()`,
+            [j.row.json]
           );
         }
       }
@@ -492,11 +555,31 @@ export class PostgresMirror {
           error TEXT NOT NULL,
           at TIMESTAMPTZ NOT NULL DEFAULT now()
         )`);
+        // Live-chat mirror (social surface, never authoritative — the in-memory
+        // ring serves history; this keeps an audit trail across restarts).
+        await c.query(`CREATE TABLE IF NOT EXISTS chat_messages (
+          id TEXT PRIMARY KEY,
+          wallet TEXT NOT NULL,
+          page TEXT NOT NULL,
+          text TEXT NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )`);
+        await c.query(
+          `CREATE INDEX IF NOT EXISTS chat_messages_page_ts ON chat_messages (page, created_at DESC)`
+        );
         // Operator kill switch. Never a secret: ACTIVE/PAUSED only. A restart
         // must not silently re-enable deposits an operator switched off.
         await c.query(`CREATE TABLE IF NOT EXISTS admin_state (
           id TEXT PRIMARY KEY,
           deposits TEXT NOT NULL,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )`);
+        // Off-chain game settings (per-user pool caps, deposit bounds). Never a
+        // secret and never authoritative for money — the program enforces the
+        // real limits. Persisted so a restart does not silently reset them.
+        await c.query(`CREATE TABLE IF NOT EXISTS game_settings (
+          id TEXT PRIMARY KEY,
+          json TEXT NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
         )`);
         this.client = c;
@@ -610,6 +693,27 @@ export class PostgresMirror {
     };
     const res = await client.query(`SELECT deposits FROM admin_state WHERE id = 'global'`);
     const value = res.rows[0]?.deposits;
+    return typeof value === "string" ? value : null;
+  }
+
+  /** Persist the off-chain game settings blob (JSON). Fire-and-forget. */
+  upsertGameSettings(json: string): void {
+    this.enqueue({
+      table: "game_settings",
+      op: "upsert",
+      row: { json },
+      dedupeKey: sha256(`game_settings:${json}`),
+    });
+  }
+
+  /** Read the persisted game settings back at boot, or null when unset. */
+  async readGameSettings(): Promise<string | null> {
+    if (!this.databaseUrl || !this.databaseUrl.startsWith("postgres")) return null;
+    const client = (await this.getClient()) as {
+      query: (sql: string, params?: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>;
+    };
+    const res = await client.query(`SELECT json FROM game_settings WHERE id = 'global'`);
+    const value = res.rows[0]?.json;
     return typeof value === "string" ? value : null;
   }
 

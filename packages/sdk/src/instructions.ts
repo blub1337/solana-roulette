@@ -159,6 +159,32 @@ export function setFeeIx(programId: PublicKey, operator: PublicKey, feeBps: numb
 }
 
 // ---------------------------------------------------------------------------
+// set_treasury(treasury: Pubkey) — OPERATOR-ONLY. Added by the in-place
+// program upgrade so the platform fee wallet (frozen at initialize_config) can
+// be moved to an address the operator controls. Only FUTURE payouts change:
+// pay_winners reads config.treasury at call time, so rounds already settled
+// or paid keep exactly what they recorded, and fees already received are never
+// moved — never retroactive. The operator check lives in the program.
+// ---------------------------------------------------------------------------
+
+export function setTreasuryIx(
+  programId: PublicKey,
+  operator: PublicKey,
+  treasury: PublicKey
+): TransactionInstruction {
+  const data = Buffer.concat([globalDiscriminator("set_treasury"), treasury.toBuffer()]);
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      meta(configPda(programId), false, true),
+      meta(operator, true, true),
+      meta(SystemProgram.programId, false, false),
+    ],
+    data,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // lock_round() — PERMISSIONLESS. `payer` is the tx fee payer, not a
 // privileged operator: the instruction writes only seed-validated config
 // values plus Clock::get(), so any signer produces identical state.
