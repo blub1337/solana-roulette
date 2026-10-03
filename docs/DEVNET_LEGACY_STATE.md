@@ -89,6 +89,30 @@ This matters more than the devnet dust. A mainnet round that stalls this way
 would hold real funds in an escrow the product will not drain. See
 [Scope](#scope).
 
+### Resolved: the driver now sweeps stalled rounds (2026-10-03)
+
+`apps/api/src/settlement.ts` gained `sweepStalledRounds`, which `runOnce` calls
+out on a throttled interval. It scans a bounded window of ids below the newest
+round, skips lane heads (the head loop owns those), and finishes every
+remaining `RANDOMNESS_PENDING` round through the SAME path as a head —
+`settle_round` once the reveal slot is reached, then `pay_winners` — but
+**without** opening a new round for the lane (the lane already points past the
+orphan). It never calls `cancel_round`.
+
+This is option 2 from [Scope](#scope) below: the permissionless settle/pay pair
+walks stuck rounds, not just lane heads, so a vanished operator cannot strand
+them either. Live ledger rounds 24/25 remain as-is (devnet test wallets, no
+recovery tool — see [Why nothing moves](#why-nothing-moves)); the point is that
+the *mechanism* now exists.
+
+**Residual limitation.** `settle_round` reads the reveal slot's hash from the
+`SlotHashes` sysvar, which retains only a bounded recency window. A round that
+has sat in `RANDOMNESS_PENDING` longer than that window is no longer settleable,
+and the program forbids `cancel_round` from `RANDOMNESS_PENDING` — so such a
+round cannot be cleared without a program change. For live operation this is
+irrelevant (the sweep runs every `STALLED_SWEEP_MS`, default 60 s), but it is
+the reason a pre-existing, long-stalled round is still not recoverable.
+
 ## Why nothing moves
 
 1. **The driver does not revisit them.** `advanceTierLane` works on
@@ -124,5 +148,9 @@ Before mainnet, decide explicitly how a stalled round is finished:
   instructions are already permissionless on-chain, so this needs no new
   program authority — only a driver that walks stuck rounds, not just lane heads.
 
-Write the decision into [DEPLOYMENT.md](./DEPLOYMENT.md) before mainnet. Until
-then this document is the record of the open item.
+**Decision (2026-10-03):** option 2 is implemented — `sweepStalledRounds` in
+`apps/api/src/settlement.ts` drives non-head `RANDOMNESS_PENDING` rounds through
+the permissionless `settle_round` / `pay_winners` pair. The decision is recorded
+in [DEPLOYMENT.md](./DEPLOYMENT.md) §9. This document remains the record of the
+residual on-chain limitation (a round stalled past the `SlotHashes` retention
+window cannot be settled or cancelled without a program change).

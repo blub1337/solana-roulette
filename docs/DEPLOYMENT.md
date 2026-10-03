@@ -110,3 +110,28 @@ upgrade (or a config re-init on a fresh deploy).
 3. Switch randomness to a real VRF (`docs/RANDOMNESS.md` §3).
 4. Set `SOLANA_NETWORK=mainnet-beta` **and** `ENABLE_MAINNET=true` in the operator env
    only. Nothing in the UI can enable it.
+
+## 9. Stalled-round recovery (decision, 2026-10-03)
+
+A round that is locked and then overtaken by its lane — or orphaned across a
+restart — used to sit in `RANDOMNESS_PENDING` forever, because the settlement
+driver only ever advanced a lane's HEAD (`advanceTierLane`). On devnet this is
+visible as rounds 24/25 (`DEVNET_LEGACY_STATE.md`).
+
+**Decision:** the driver now finishes such rounds itself. `runOnce` calls
+`sweepStalledRounds` (`apps/api/src/settlement.ts`) on a throttled interval
+(`STALLED_SWEEP_MS`, default 60000; `0` disables). The sweep scans a bounded id
+window (`STALLED_SWEEP_WINDOW`, default 200) below the newest round, skips lane
+heads, and drives every remaining `RANDOMNESS_PENDING` round through the same
+path as a head — permissionless `settle_round` then `pay_winners` — **without**
+opening a new round for the lane and **without** ever calling `cancel_round`.
+
+Why not `cancel_round`: the program allows cancel only from `OPEN|FULL` and it
+is operator-gated, so a `RANDOMNESS_PENDING` round cannot be cancelled — but it
+can always be settled and paid by anyone, which is exactly the property that
+stops a vanished operator from stranding funds (see `RANDOMNESS.md` §2.3).
+
+Residual limitation: `settle_round` needs the reveal slot's hash, which the
+`SlotHashes` sysvar retains only within a bounded recency window. A round
+stalled beyond that window is neither settleable nor cancellable without a
+program change; the sweep logs it as `failed` and leaves it (it never guesses).

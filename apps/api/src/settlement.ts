@@ -50,6 +50,16 @@ export interface SettlementDriverDeps {
 let started = false;
 
 /**
+ * Last time the stalled-round sweep ran from `runOnce` (epoch ms).
+ *
+ * Initialised at module load, so the FIRST driver tick does not sweep: the
+ * sweep waits one full `STALLED_SWEEP_MS` after boot and then runs on its own
+ * cadence. Tests that want to exercise the sweep call `sweepStalledRounds`
+ * directly (or re-arm this clock with `resetStalledSweepClockForTests`).
+ */
+let lastStalledSweepAt = Date.now();
+
+/**
  * Rehydrate the lane heads from the chain after a restart.
  *
  * `store.currentRoundIdByTier` is in-memory only and boots at [1, 2, 3]. In
@@ -308,6 +318,22 @@ export async function runOnce(deps: SettlementDriverDeps): Promise<void> {
       console.warn(`[settlement] tier ${tier}:`, e instanceof Error ? e.message : e);
     }
   }
+
+  // Stalled-round sweep (see sweepStalledRounds). A round that left its lane's
+  // head — locked, then overtaken by the lane, or orphaned by a restart — is
+  // invisible to the per-lane loop above and would sit in RANDOMNESS_PENDING
+  // forever, holding its pot in escrow. This finishes it too. Throttled so the
+  // extra scan (one batched read of a bounded id window) does not run on every
+  // 5 s tick; `STALLED_SWEEP_MS=0` disables the automatic sweep.
+  const sweepMs = stalledSweepIntervalMs();
+  if (sweepMs > 0 && Date.now() - lastStalledSweepAt >= sweepMs) {
+    lastStalledSweepAt = Date.now();
+    try {
+      await sweepStalledRounds(deps);
+    } catch (e) {
+      console.warn("[settlement] sweep:", e instanceof Error ? e.message : e);
+    }
+  }
 }
 
 /** Advance one tier's lane by exactly one state-machine step. */
@@ -380,92 +406,332 @@ export async function advanceTierLane(tier: number, deps: SettlementDriverDeps):
       break;
     }
     case "RANDOMNESS_PENDING": {
-      const winnerFrozen = !!round.winner && !round.winner.equals(PublicKey.default);
-
-      if (!winnerFrozen) {
-        const slot = await backend.getCurrentSlot();
-        if (slot < round.revealSlot) break; // reveal slot not reached — wait
-        const settled = await backend.runLifecycle("settle", { roundId });
-        if (settled) {
-          broadcast({
-            type: "randomness_arrived",
-            roundId: roundId.toString(),
-            data: { tier, revealSlot: round.revealSlot.toString() },
-          });
-        }
-        break;
-      }
-
-      // Winner frozen → pay out (phase 2).
-      if (store.hasPayout(roundId.toString())) break; // secondary idempotence guard
-
-      // REAL funds path: the winner is paid with an actual devnet transfer and
-      // the round stays open until that transfer is CONFIRMED on chain.
-      if (deps.payouts) {
-        const outcome = await deps.payouts.ensureRoundPaid({
-          roundId,
-          tier: round.tier,
-          winner: round.winner.toBase58(),
-        });
-        if (outcome.status !== "CONFIRMED") {
-          // PENDING (submitted, waiting) / FAILED (retry with backoff) /
-          // SKIPPED (custody not configured): never complete, never advance.
-          txLog.warn("settlement.payout_not_confirmed", {
-            roundId: roundId.toString(),
-            tier: round.tier,
-            winner: round.winner.toBase58(),
-            status: outcome.status,
-            reason: outcome.reason,
-          });
-          break;
-        }
-        await completePaidRound(tier, deps, roundId, {
-          signature: outcome.signature,
-          winner: outcome.winner,
-          payoutLamports: outcome.payoutLamports,
-          feeLamports: outcome.feeLamports,
-          alreadyPaid: outcome.alreadyPaid,
-        });
-        return;
-      }
-
-      const sent = await backend.runLifecycle("pay", { roundId });
-      if (sent) {
-        // Program-paid path: the program moved the lamports and the signature
-        // is already confirmed before this point (verify-first principle).
-        store.markPayout(roundId.toString());
-        broadcast({
-          type: "winner",
-          roundId: roundId.toString(),
-          data: { tier, winner: sent.winner, payoutLamports: sent.payoutLamports, feeLamports: sent.feeLamports },
-        });
-        broadcast({
-          type: "settlement",
-          roundId: roundId.toString(),
-          data: {
-            tier,
-            signature: sent.signature,
-            payoutTx: sent.signature,
-            explorer: `https://explorer.solana.com/tx/${sent.signature}?cluster=devnet`,
-          },
-        });
-        store.upsertRound({
-          id: roundId.toString(),
-          tier,
-          status: "COMPLETED",
-          feeBps: round.feeBps,
-          winner: sent.winner ?? null,
-          payoutTxSignature: sent.signature,
-          settlementVerified: true,
-          completedAt: new Date(),
-        });
-        await openNextRound(tier, deps, roundId);
-      }
+      // Head path: finish the round (settle, then pay) and — because this IS
+      // the lane head — open the lane's next round once the payout is
+      // confirmed. The steps are shared with the stalled-round sweep via
+      // advancePendingRound, so an orphaned round is finished exactly like a
+      // head; only `openNextRound` differs (the sweep must not advance the lane).
+      await advancePendingRound(tier, round, deps, { openNextRound: true });
       break;
     }
     default:
       break; // LOCKED/SETTLING are DTO aliases; the runtime never reports them
   }
+}
+
+/**
+ * Outcome of advancing a RANDOMNESS_PENDING round one step.
+ *
+ *   waiting      — the reveal slot has not been reached yet
+ *   settled      — phase 1 ran (winner/ticket/fee/payout frozen on chain)
+ *   paid         — the winner was paid and the round is COMPLETED
+ *   already-paid — a CONFIRMED payout already exists (no-op)
+ *   deferred     — a payout was attempted but is not CONFIRMED yet (retry later)
+ *   failed       — the on-chain instruction was rejected (logged, retried later)
+ */
+export type PendingOutcome =
+  | "waiting"
+  | "settled"
+  | "paid"
+  | "already-paid"
+  | "deferred"
+  | "failed";
+
+/**
+ * Advance ONE round that is currently RANDOMNESS_PENDING by one state-machine
+ * step: settle it (phase 1) once the reveal slot is reached, then pay the
+ * frozen winner (phase 2) and mark it COMPLETED. Idempotent — the round's own
+ * on-chain status and the tx ledger guard every step, so calling it repeatedly
+ * is a no-op.
+ *
+ * Shared by the lane-head path (`advanceTierLane`) and the stalled-round sweep
+ * so an orphaned round is finished with EXACTLY the same steps as a head. The
+ * only difference is `openNextRound`: a completed HEAD must advance its lane,
+ * an ORPHAN must NOT (the lane already points past it — opening a round there
+ * would create a duplicate nobody settles).
+ *
+ * This NEVER calls `cancel_round`: the program only allows cancel from
+ * OPEN/FULL and cancel is operator-gated, so a stalled RANDOMNESS_PENDING round
+ * can always be finished permissionlessly (settle + pay) but cannot be
+ * cancelled — which is exactly what a vanished operator cannot block.
+ * See docs/RANDOMNESS.md §2.3.
+ */
+async function advancePendingRound(
+  tier: number,
+  round: RoundData,
+  deps: SettlementDriverDeps,
+  opts: { openNextRound: boolean }
+): Promise<PendingOutcome> {
+  const { backend } = deps;
+  const roundId = round.id;
+  const winnerFrozen = !!round.winner && !round.winner.equals(PublicKey.default);
+
+  if (!winnerFrozen) {
+    const slot = await backend.getCurrentSlot();
+    if (slot < round.revealSlot) return "waiting"; // reveal slot not reached
+    const settled = await backend.runLifecycle("settle", { roundId });
+    if (!settled) return "failed";
+    broadcast({
+      type: "randomness_arrived",
+      roundId: roundId.toString(),
+      data: { tier, revealSlot: round.revealSlot.toString() },
+    });
+    return "settled";
+  }
+
+  // Winner frozen → pay out (phase 2).
+  if (store.hasPayout(roundId.toString())) return "already-paid"; // idempotence guard
+
+  // REAL funds path: the winner is paid with an actual devnet transfer and the
+  // round stays open until that transfer is CONFIRMED on chain.
+  if (deps.payouts) {
+    const outcome = await deps.payouts.ensureRoundPaid({
+      roundId,
+      tier: round.tier,
+      winner: round.winner.toBase58(),
+    });
+    if (outcome.status !== "CONFIRMED") {
+      // PENDING (submitted, waiting) / FAILED (retry with backoff) /
+      // SKIPPED (custody not configured): never complete, never advance.
+      txLog.warn("settlement.payout_not_confirmed", {
+        roundId: roundId.toString(),
+        tier: round.tier,
+        winner: round.winner.toBase58(),
+        status: outcome.status,
+        reason: outcome.reason,
+      });
+      return "deferred";
+    }
+    await completePaidRound(
+      tier,
+      deps,
+      roundId,
+      {
+        signature: outcome.signature,
+        winner: outcome.winner,
+        payoutLamports: outcome.payoutLamports,
+        feeLamports: outcome.feeLamports,
+        alreadyPaid: outcome.alreadyPaid,
+      },
+      opts.openNextRound
+    );
+    return "paid";
+  }
+
+  const sent = await backend.runLifecycle("pay", { roundId });
+  if (!sent) return "failed";
+  // Program-paid path: the program moved the lamports and the signature is
+  // already verified before this point (backend.ts verifies every pay result).
+  store.markPayout(roundId.toString());
+  broadcast({
+    type: "winner",
+    roundId: roundId.toString(),
+    data: { tier, winner: sent.winner, payoutLamports: sent.payoutLamports, feeLamports: sent.feeLamports },
+  });
+  broadcast({
+    type: "settlement",
+    roundId: roundId.toString(),
+    data: {
+      tier,
+      signature: sent.signature,
+      payoutTx: sent.signature,
+      explorer: `https://explorer.solana.com/tx/${sent.signature}?cluster=devnet`,
+    },
+  });
+  store.upsertRound({
+    id: roundId.toString(),
+    tier,
+    status: "COMPLETED",
+    feeBps: round.feeBps,
+    winner: sent.winner ?? null,
+    payoutTxSignature: sent.signature,
+    settlementVerified: true,
+    completedAt: new Date(),
+  });
+  if (opts.openNextRound) await openNextRound(tier, deps, roundId);
+  return "paid";
+}
+
+/**
+ * How often the stalled-round sweep may run from `runOnce`, in ms.
+ *
+ * The sweep is one bounded extra read (a single batched window), so it runs
+ * well below the tick rate. `0` disables the automatic sweep; the exported
+ * `sweepStalledRounds` stays callable and testable either way.
+ */
+export const DEFAULT_STALLED_SWEEP_MS = 60_000;
+export function stalledSweepIntervalMs(): number {
+  const raw = process.env.STALLED_SWEEP_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_STALLED_SWEEP_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_STALLED_SWEEP_MS;
+  return Math.round(n);
+}
+
+/**
+ * How many round ids below the newest the sweep scans in one pass. Big enough
+ * to span every lane's recent history (the quietest lane's newest round can sit
+ * far below the global counter), small enough to remain one batched read.
+ */
+export const DEFAULT_STALLED_SWEEP_WINDOW = 200;
+export function stalledSweepWindow(): number {
+  const raw = process.env.STALLED_SWEEP_WINDOW;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_STALLED_SWEEP_WINDOW;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) return DEFAULT_STALLED_SWEEP_WINDOW;
+  return Math.min(n, 2_000);
+}
+
+/** What one sweep pass did, for logs and tests. */
+export interface StalledSweepReport {
+  /** Round ids examined this pass. */
+  scanned: number;
+  /** Rounds that were RANDOMNESS_PENDING and not a lane head. */
+  candidates: number;
+  /** Phase 1 (settle) ran this pass. */
+  settled: number;
+  /** Phase 2 ran and the round is COMPLETED. */
+  paid: number;
+  /** Reveal slot not reached yet — nothing done. */
+  waiting: number;
+  /** Payout attempted but not yet CONFIRMED — retried next pass. */
+  deferred: number;
+  /** On-chain step rejected (e.g. reveal hash expired) — retried next pass. */
+  failed: number;
+  /** Ids skipped because they ARE a lane head (owned by advanceTierLane). */
+  skippedHeads: number;
+}
+
+/**
+ * Finish non-head rounds stalled in RANDOMNESS_PENDING.
+ *
+ * `advanceTierLane` only ever looks at a lane's HEAD. A round that was locked
+ * and then overtaken (the lane moved on, or the driver restarted pointing at a
+ * different round) is never visited again and sits in RANDOMNESS_PENDING
+ * holding its pot in escrow — measured on devnet as rounds 24/25
+ * (docs/DEVNET_LEGACY_STATE.md).
+ *
+ * This scans a bounded window of ids below the newest round, skips lane heads
+ * (the normal loop owns those), and drives every remaining RANDOMNESS_PENDING
+ * round through the SAME finish path as a head — settle once the reveal slot is
+ * reached, then pay — but WITHOUT opening a new round for the lane.
+ *
+ * Safety properties, pinned by tests:
+ *   - it only ever touches rounds whose on-chain status is exactly
+ *     RANDOMNESS_PENDING — never OPEN/FULL/terminal, so it cannot interfere
+ *     with an active or already-settled round;
+ *   - it NEVER calls `cancel_round` (the program forbids cancel from
+ *     RANDOMNESS_PENDING and cancel is operator-gated), so it can never cancel
+ *     a healthy round;
+ *   - every step is idempotent (status + tx ledger), so running concurrently
+ *     with the head loop cannot double-settle or double-pay;
+ *   - a read failure aborts the pass without touching anything.
+ */
+export async function sweepStalledRounds(
+  deps: SettlementDriverDeps,
+  opts: { window?: number } = {}
+): Promise<StalledSweepReport> {
+  const { backend } = deps;
+  const report: StalledSweepReport = {
+    scanned: 0,
+    candidates: 0,
+    settled: 0,
+    paid: 0,
+    waiting: 0,
+    deferred: 0,
+    failed: 0,
+    skippedHeads: 0,
+  };
+
+  const heads = await backend.getHeadByTier();
+  const headIds = new Set(heads.filter((h) => h > 0n).map((h) => h.toString()));
+
+  // Upper bound: the newest id is the on-chain counter. Fall back to the
+  // highest lane head so the sweep still works when the config is unreadable.
+  let top = heads.reduce((m, h) => (h > m ? h : m), 0n);
+  try {
+    const cfg = await backend.getGlobalConfig();
+    if (cfg?.roundCounter && cfg.roundCounter > top) top = cfg.roundCounter;
+  } catch {
+    /* keep the head-based bound */
+  }
+
+  const window = opts.window ?? stalledSweepWindow();
+  const ids: bigint[] = [];
+  for (let id = top; id >= 1n && ids.length < window; id--) {
+    if (headIds.has(id.toString())) {
+      report.skippedHeads++;
+      continue;
+    }
+    ids.push(id);
+  }
+  if (ids.length === 0) return report;
+  report.scanned = ids.length;
+
+  let rounds: Map<string, RoundData>;
+  try {
+    if (backend.getRounds) {
+      rounds = await backend.getRounds(ids);
+    } else {
+      rounds = new Map<string, RoundData>();
+      for (const id of ids) {
+        const r = await backend.getRound(id);
+        if (r) rounds.set(id.toString(), r);
+      }
+    }
+  } catch (err) {
+    txLog.warn("settlement.sweep_read_failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return report;
+  }
+
+  for (const id of ids) {
+    const round = rounds.get(id.toString());
+    if (!round || round.legacy) continue;
+    if (round.status !== "RANDOMNESS_PENDING") continue;
+    report.candidates++;
+    try {
+      const outcome = await advancePendingRound(round.tier, round, deps, {
+        openNextRound: false,
+      });
+      switch (outcome) {
+        case "settled":
+          report.settled++;
+          break;
+        case "paid":
+          report.paid++;
+          break;
+        case "waiting":
+          report.waiting++;
+          break;
+        case "deferred":
+          report.deferred++;
+          break;
+        case "failed":
+          report.failed++;
+          break;
+        default:
+          break; // already-paid: nothing left to do
+      }
+    } catch (err) {
+      report.failed++;
+      txLog.warn("settlement.sweep_round_failed", {
+        roundId: id.toString(),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  if (report.candidates > 0) {
+    txLog.warn("settlement.sweep", { ...report, network: deps.cfg.network });
+  }
+  return report;
+}
+
+/** Test-only: re-arm the sweep throttle so a `runOnce` can be forced to sweep. */
+export function resetStalledSweepClockForTests(): void {
+  lastStalledSweepAt = 0;
 }
 
 /**
@@ -482,7 +748,14 @@ async function completePaidRound(
     payoutLamports: bigint;
     feeLamports: bigint;
     alreadyPaid: boolean;
-  }
+  },
+  /**
+   * Open the lane's next round after completing. The lane-head path passes
+   * `true`; the stalled-round sweep passes `false`, because it finishes an
+   * ORPHAN round whose lane already points past it — opening a round there
+   * would create a duplicate nobody settles.
+   */
+  openNext = true
 ): Promise<void> {
   const { backend } = deps;
   // Flip the runtime state only now that the money has actually moved.
@@ -528,7 +801,7 @@ async function completePaidRound(
       status: "CONFIRMED",
     });
   }
-  await openNextRound(tier, deps, roundId);
+  if (openNext) await openNextRound(tier, deps, roundId);
 }
 /** Create the next round for this lane; the id always comes from the counter. */
 async function openNextRound(
