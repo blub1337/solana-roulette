@@ -89,7 +89,31 @@ export async function buildServer(deps?: ApiDeps) {
   // response that mentions the fee reads it from here — see feeTerms.ts.
   const effectiveFee = createFeeResolver(active, cfg);
 
-  await registerRoutes(app, { backend: active, connection, programId, cfg, custody, effectiveFee });
+  // Real devnet money movement. In "chain" mode the program pays winners; in
+  // "local" mode the server pays them from the escrow with a real transfer.
+  // Built before the routes because the settlement driver needs it, and the
+  // driver is handed to the routes.
+  const depositDeps: DepositDeps = { backend: active, connection, custody, cfg, programId };
+  const payoutService = active.mode === "chain"
+    ? undefined
+    : {
+        ensureRoundPaid: (target: PayoutTarget): Promise<PayoutOutcome> =>
+          ensureRoundPaid({ backend: active, connection, custody, cfg }, target),
+      };
+
+  // Settlement driver deps are built BEFORE the routes so the refund-or-wait
+  // window a player reads from `/api/pools` is computed from the very same open
+  // clock and deadline the driver refunds on.
+  const driverDeps: SettlementDriverDeps = { backend: active, cfg, payouts: payoutService };
+  await registerRoutes(app, {
+    backend: active,
+    connection,
+    programId,
+    cfg,
+    custody,
+    effectiveFee,
+    driver: driverDeps,
+  });
   // Live chat: wallet-signed sessions, SSE fan-out, per-wallet cooldown.
   await registerChatRoutes(app);
   // Admin console API. Fails closed without ADMIN_TOKEN — there is no
@@ -114,18 +138,7 @@ export async function buildServer(deps?: ApiDeps) {
     `[runtime] mode=${active.mode} custodyReady=${custody.ready} (${backendReason}) — ${custody.reason}`
   );
 
-  // Real devnet money movement. In "chain" mode the program pays winners; in
-  // "local" mode the server pays them from the escrow with a real transfer.
-  const depositDeps: DepositDeps = { backend: active, connection, custody, cfg, programId };
-  const payoutService = active.mode === "chain"
-    ? undefined
-    : {
-        ensureRoundPaid: (target: PayoutTarget): Promise<PayoutOutcome> =>
-          ensureRoundPaid({ backend: active, connection, custody, cfg }, target),
-      };
-
   // Operator settlement loop — automatic, no admin, no AI.
-  const driverDeps: SettlementDriverDeps = { backend: active, cfg, payouts: payoutService };
   // Repair the lane heads BEFORE the driver's first tick: the in-memory array
   // boots at [1,2,3] and, in chain mode, pointing lanes at long-completed
   // rounds makes the driver open duplicate rounds while the real heads never

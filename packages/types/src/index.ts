@@ -107,6 +107,33 @@ export interface EntryDto {
   verified: boolean;
 }
 
+/**
+ * The refund decision window of a live round.
+ *
+ * A funded OPEN round that never reaches its cap is ended by the runtime (one
+ * entry per wallet per round would otherwise lock the lane forever). Instead of
+ * refunding silently, the players are ASKED first: take the exact refund now,
+ * or keep waiting. `active` is true only while that question is on the table.
+ */
+export interface RefundWindow {
+  /** True while a funded OPEN round is inside its decision window. */
+  active: boolean;
+  /** open = still filling · pending = players are being asked · refund = closing now */
+  status: "open" | "pending" | "refund";
+  /** How long the funded round has been observably OPEN, in ms. */
+  openMs: number;
+  /** Epoch ms at which the round is refunded if nobody chooses to wait. */
+  deadline: number | null;
+  /** Countdown to `deadline`, in ms (0 once it has passed). */
+  msRemaining: number;
+  /** How long the prompt itself is shown, in ms. */
+  windowMs: number;
+  /** True while a player may trigger the refund now. */
+  canRefund: boolean;
+  /** True while a player may extend the wait. */
+  canWait: boolean;
+}
+
 /** Round summary DTO derived from the decoded on-chain Round account. */
 export interface RoundSummary {
   id: string;
@@ -133,6 +160,11 @@ export interface RoundSummary {
    */
   revealInputHex?: string;
   winningTicket?: string;
+  /**
+   * The refund-or-wait decision window, when this round has one. Absent for a
+   * round that is still filling normally, is empty, or is already settling.
+   */
+  refundWindow?: RefundWindow;
 }
 
 export interface VerifyCheck {
@@ -175,7 +207,8 @@ export type SseEventType =
   | "new_round"
   | "tx"
   | "config"
-  | "chat";
+  | "chat"
+  | "refund_window";
 
 export interface SseEvent {
   type: SseEventType;

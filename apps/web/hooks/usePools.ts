@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import type { RefundWindow } from "@solana-roulette/types";
 import { API_BASE } from "../lib/apiBase";
 
 const API = API_BASE; // production-safe API base (same-origin in dev)
@@ -27,6 +28,11 @@ export interface PoolDto {
   lastWinner?: string | null;
   lastPayoutLamports?: string | null;
   lastFeeLamports?: string | null;
+  /**
+   * Present once the runtime is asking the players whether to take their
+   * deposit back or keep waiting. Null while the round is filling normally.
+   */
+  refundWindow?: RefundWindow | null;
 }
 
 /** Live state of all three pool lanes. `refresh` re-reads on demand (SSE). */

@@ -87,6 +87,57 @@ export class Store {
   }
 
   /**
+   * Refund decision window — the answer to "your deposit is about to be sent
+   * back, do you want it or would you rather keep waiting?".
+   *
+   * An OPEN round that never reaches its cap cannot be left open forever (one
+   * entry per wallet per round would lock everyone out of the lane), so the
+   * driver ends it. It used to do that silently: `cancel_round` refunded every
+   * participant on chain and a fresh round opened, so from the player's seat
+   * their deposit simply "disappeared from the pool" after a few minutes.
+   *
+   * Now the driver first ARMS a deadline and broadcasts a prompt. Players get
+   * a real choice — end the round now and get the exact refund, or keep
+   * waiting (which pushes the deadline out again). Only when the deadline
+   * passes with nobody choosing to wait does the round refund and reopen.
+   *
+   * In-memory on purpose, exactly like `openSeenAt`: a restart re-arms the
+   * window from the round's observed age, and the operator can always force a
+   * lane reset from the console.
+   */
+  private refundDeadlines = new Map<string, number>();
+  /** Rounds whose refund prompt has already been broadcast (once per round). */
+  private refundPrompted = new Set<string>();
+
+  /** Arm (or extend) a round's refund deadline; the value is an epoch ms. */
+  armRefundWindow(roundId: string | bigint, deadlineMs: number): void {
+    this.refundDeadlines.set(roundId.toString(), deadlineMs);
+  }
+
+  /** When the refund window closes, or null when the round has none armed. */
+  refundDeadlineFor(roundId: string | bigint): number | null {
+    return this.refundDeadlines.get(roundId.toString()) ?? null;
+  }
+
+  /** Forget a round's refund window (it left OPEN, was refunded, or reopened). */
+  clearRefundWindow(roundId: string | bigint): void {
+    const id = roundId.toString();
+    this.refundDeadlines.delete(id);
+    this.refundPrompted.delete(id);
+  }
+
+  /**
+   * True exactly once per round, so the refund prompt is broadcast a single
+   * time instead of on every driver tick.
+   */
+  markRefundPrompted(roundId: string | bigint): boolean {
+    const id = roundId.toString();
+    if (this.refundPrompted.has(id)) return false;
+    this.refundPrompted.add(id);
+    return true;
+  }
+
+  /**
    * Overwrite one lane's head (lane rehydration after a restart).
    *
    * Guarded because heads decide where the settlement driver looks and where

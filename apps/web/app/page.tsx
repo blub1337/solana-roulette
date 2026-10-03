@@ -175,10 +175,27 @@ export default function Home() {
                     </div>
                   </dl>
 
+                  {/*
+                   * The refund-or-wait prompt, surfaced on the card so a player
+                   * notices it without opening the room. It is a choice, not a
+                   * silent refund: the deposit stays in the pot until the
+                   * player (or the timer) decides.
+                   */}
+                  {p.refundWindow?.active && (
+                    <div className="mt-4 rounded-lg border border-gold-500/40 bg-gold-500/10 px-3 py-2 text-xs text-gold-200">
+                      Refund window open — your deposit is about to be sent back.
+                      Open the table to take it now or keep waiting.
+                    </div>
+                  )}
+
                   <div className="mt-6 flex items-center justify-between">
                     <span className="text-sm font-semibold text-gold-300">Enter table →</span>
                     <span className="text-xs text-ivory/40">
-                      {p.status === "OPEN" ? "deposits open" : "in settlement"}
+                      {p.refundWindow?.active
+                        ? "decide: refund or wait"
+                        : p.status === "OPEN"
+                          ? "deposits open"
+                          : "in settlement"}
                     </span>
                   </div>
                 </Link>

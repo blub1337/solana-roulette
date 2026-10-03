@@ -12,6 +12,7 @@ import { ModeBanner } from "../../../components/ModeBanner";
 import { DevnetBadge } from "../../../components/DevnetBadge";
 import { BrandLogo, BRAND_NAME } from "../../../components/BrandLogo";
 import { LiveChat } from "../../../components/LiveChat";
+import { RefundChoice } from "../../../components/RefundChoice";
 import { useRoundState } from "../../../hooks/useRoundState";
 import { useDeposit } from "../../../hooks/useDeposit";
 import { useRuntime } from "../../../hooks/useRuntime";
@@ -77,6 +78,9 @@ export default function PoolRoom() {
     return ((Number(myEntry.amountLamports) / total) * 100).toFixed(2);
   }, [myEntry, round]);
 
+  // The refund-or-wait decision window the runtime has armed for this round.
+  const refundWindow = round?.refundWindow ?? null;
+
   const onDeposit = useCallback(async () => {
     if (!publicKey || !round) return;
     // Defence in depth: only ever deposit into the round THIS lane is showing.
@@ -113,7 +117,7 @@ export default function PoolRoom() {
       setNotice({
         kind: "err",
         text: /already_deposited/i.test(raw)
-          ? "You already have an entry in this round — one entry per wallet per round. Join again when this pool opens its next round; a low-traffic round that never fills is refunded and reopened automatically."
+          ? "You already have an entry in this round — one entry per wallet per round. Join again when this pool opens its next round; if a low-traffic round never fills you are asked whether to take your deposit back or keep waiting."
           : `${raw} Nothing was credited.`,
       });
       void refresh();
@@ -160,6 +164,19 @@ export default function PoolRoom() {
           <span>⚠ {error} — retrying automatically…</span>
         </div>
       )}
+
+      {/*
+       * The player's choice on a stalled round: take the exact refund now, or
+       * keep waiting. Shown ABOVE the tables so it cannot be missed — it used
+       * to be a silent refund that made the deposit disappear from the pool.
+       */}
+      <RefundChoice
+        roundId={round?.id ?? ""}
+        refundWindow={refundWindow}
+        myStakeLamports={myEntry?.amountLamports ?? null}
+        isParticipant={Boolean(myEntry)}
+        onResolved={() => void refresh()}
+      />
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Wheel + pot */}
@@ -242,9 +259,8 @@ export default function PoolRoom() {
               <span>
                 You already have an entry in round <strong>#{round?.id}</strong> (
                 {lamportsToSol(myEntry.amountLamports)} ◎). One entry per wallet per round — you
-                can join again when this pool opens its next round. A low-traffic round that never
-                reaches its cap is refunded and reopened automatically, so a quiet pool can never
-                lock you out.
+                can join again when this pool opens its next round. If this round never reaches its
+                cap the runtime asks you first: take your exact deposit back, or keep waiting.
               </span>
             </div>
           ) : (

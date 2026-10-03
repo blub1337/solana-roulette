@@ -19,9 +19,16 @@ import { PublicKey } from "@solana/web3.js";
 import {
   advanceLaneManually,
   advanceTierLane,
+  DEFAULT_REFUND_WINDOW_MS,
   DEFAULT_ROUND_TIMEOUT_MS,
+  laneRefundWindow,
+  MIN_REFUND_WINDOW_MS,
   MIN_ROUND_TIMEOUT_MS,
+  refundWindowFor,
+  refundWindowMs,
+  requestRoundRefund,
   roundTimeoutMs,
+  waitLongerOnRound,
 } from "./settlement.js";
 import { createLocalBackend } from "./backend.js";
 import type { ChainBackend, LifecycleAction, LifecycleArgs } from "./backend.js";
@@ -124,18 +131,25 @@ const cfg = resolveConfig({} as NodeJS.ProcessEnv);
 
 let savedHeads: bigint[];
 let savedTimeout: string | undefined;
+let savedWindow: string | undefined;
 
 beforeEach(() => {
   savedHeads = [...store.currentRoundIdByTier];
   savedTimeout = process.env.ROUND_TIMEOUT_MS;
+  savedWindow = process.env.REFUND_WINDOW_MS;
 });
 
 afterEach(() => {
   store.currentRoundIdByTier = [...savedHeads];
   if (savedTimeout === undefined) delete process.env.ROUND_TIMEOUT_MS;
   else process.env.ROUND_TIMEOUT_MS = savedTimeout;
-  // Forget the open clock for the ids these tests used.
-  for (const id of [5n, 9n, 1n, 2n]) store.clearOpenSeen(id);
+  if (savedWindow === undefined) delete process.env.REFUND_WINDOW_MS;
+  else process.env.REFUND_WINDOW_MS = savedWindow;
+  // Forget the open clock AND the refund window for the ids these tests used.
+  for (const id of [5n, 9n, 1n, 2n]) {
+    store.clearOpenSeen(id);
+    store.clearRefundWindow(id);
+  }
 });
 
 describe("roundTimeoutMs (env parsing)", () => {
@@ -179,6 +193,9 @@ describe("stale OPEN round timeout (low-traffic lanes keep accepting deposits)",
 
   it("cancels AND reopens a funded OPEN round once it is older than the timeout", async () => {
     process.env.ROUND_TIMEOUT_MS = "60000";
+    // Window off: this pins the pure safety valve, i.e. what happens when the
+    // players never answer the prompt.
+    process.env.REFUND_WINDOW_MS = "0";
     const h = harness(makeRound({ id: 5n, tier: 0, status: "OPEN", pot: 100_000_000n }), [5n, 0n, 0n]);
     store.markOpenSeen(5n, Date.now() - 120_000); // observed OPEN two minutes ago
 
@@ -216,6 +233,7 @@ describe("stale OPEN round timeout (low-traffic lanes keep accepting deposits)",
 
   it("orphans the cancelled round's ledger entries so they stop counting", async () => {
     process.env.ROUND_TIMEOUT_MS = "60000";
+    process.env.REFUND_WINDOW_MS = "0";
     const roundId = 5n;
     const wallet = new PublicKey(new Uint8Array(32).fill(11)).toBase58();
     const h = harness(makeRound({ id: roundId, tier: 0, status: "OPEN", pot: 100_000_000n }), [5n, 0n, 0n]);
@@ -244,6 +262,7 @@ describe("stale OPEN round timeout (low-traffic lanes keep accepting deposits)",
 
   it("re-arms instead of hammering when the cancel fails", async () => {
     process.env.ROUND_TIMEOUT_MS = "60000";
+    process.env.REFUND_WINDOW_MS = "0";
     const h = harness(makeRound({ id: 5n, tier: 0, status: "OPEN", pot: 100_000_000n }), [5n, 0n, 0n]);
     h.cancelOk = false;
     store.markOpenSeen(5n, Date.now() - 120_000);
@@ -255,6 +274,149 @@ describe("stale OPEN round timeout (low-traffic lanes keep accepting deposits)",
     expect(h.calls.map((c) => c.action)).toEqual(["cancel"]);
     expect(store.openSeenAtFor(5n)).toBeNull();
     expect(h.heads[0]).toBe(5n);
+  });
+});
+
+/**
+ * The player's choice.
+ *
+ * A funded round that never fills used to be refunded silently after the
+ * timeout: the deposit vanished from the pool and came back to the wallet with
+ * no say from the player. Now the round first enters a DECISION WINDOW and asks
+ * "refund now, or keep waiting?". These tests pin the window, both answers, and
+ * the fact that nothing is refunded while the window is still open.
+ */
+describe("refund-or-wait decision window", () => {
+  it("defaults to a two-minute prompt, clamped and disable-able", () => {
+    delete process.env.REFUND_WINDOW_MS;
+    expect(refundWindowMs()).toBe(DEFAULT_REFUND_WINDOW_MS);
+    expect(DEFAULT_REFUND_WINDOW_MS).toBe(120_000);
+    process.env.REFUND_WINDOW_MS = "0";
+    expect(refundWindowMs()).toBe(0);
+    process.env.REFUND_WINDOW_MS = "1000";
+    expect(refundWindowMs()).toBe(MIN_REFUND_WINDOW_MS);
+    process.env.REFUND_WINDOW_MS = "nonsense";
+    expect(refundWindowMs()).toBe(DEFAULT_REFUND_WINDOW_MS);
+  });
+
+  it("does NOT refund while the window is still open — the players are asked first", async () => {
+    process.env.ROUND_TIMEOUT_MS = "60000";
+    process.env.REFUND_WINDOW_MS = "30000";
+    const h = harness(makeRound({ id: 5n, tier: 0, status: "OPEN", pot: 100_000_000n }), [5n, 0n, 0n]);
+    // 45 s into a 60 s timeout: inside the final 30 s, so the prompt is armed.
+    store.markOpenSeen(5n, Date.now() - 45_000);
+
+    await advanceTierLane(0, { backend: h.backend, cfg });
+
+    // No cancel, no create — the round simply asks.
+    expect(h.calls).toEqual([]);
+    const window = laneRefundWindow(0, { backend: h.backend, cfg }, h.rounds.get("5")!);
+    expect(window.active).toBe(true);
+    expect(window.status).toBe("pending");
+    expect(window.canRefund).toBe(true);
+    expect(window.canWait).toBe(true);
+    expect(window.msRemaining).toBeGreaterThan(0);
+    expect(window.msRemaining).toBeLessThanOrEqual(15_000);
+  });
+
+  it("reports no window for a fresh round (the prompt is not a hair-trigger)", async () => {
+    process.env.ROUND_TIMEOUT_MS = "60000";
+    process.env.REFUND_WINDOW_MS = "30000";
+    const h = harness(makeRound({ id: 5n, tier: 0, status: "OPEN", pot: 100_000_000n }), [5n, 0n, 0n]);
+    await advanceTierLane(0, { backend: h.backend, cfg });
+
+    const window = laneRefundWindow(0, { backend: h.backend, cfg }, h.rounds.get("5")!);
+    expect(window.active).toBe(false);
+    expect(store.refundDeadlineFor(5n)).toBeNull();
+  });
+
+  it("refunds once the window closes unanswered (nobody chose to wait)", async () => {
+    process.env.ROUND_TIMEOUT_MS = "60000";
+    process.env.REFUND_WINDOW_MS = "30000";
+    const h = harness(makeRound({ id: 5n, tier: 0, status: "OPEN", pot: 100_000_000n }), [5n, 0n, 0n]);
+    store.markOpenSeen(5n, Date.now() - 45_000);
+    // Arm the window, then let it expire without an answer.
+    store.armRefundWindow(5n, Date.now() - 1);
+
+    await advanceTierLane(0, { backend: h.backend, cfg });
+
+    expect(h.calls.map((c) => c.action)).toEqual(["cancel", "create"]);
+    expect(h.rounds.get("5")!.status).toBe("CANCELLED");
+    expect(store.refundDeadlineFor(5n)).toBeNull();
+  });
+
+  it('"keep waiting" extends the deadline and cancels nothing', async () => {
+    process.env.ROUND_TIMEOUT_MS = "60000";
+    process.env.REFUND_WINDOW_MS = "30000";
+    const h = harness(makeRound({ id: 5n, tier: 0, status: "OPEN", pot: 100_000_000n }), [5n, 0n, 0n]);
+    store.markOpenSeen(5n, Date.now() - 45_000);
+    await advanceTierLane(0, { backend: h.backend, cfg });
+    expect(h.calls).toEqual([]);
+
+    const result = await waitLongerOnRound(0, { backend: h.backend, cfg }, 5n);
+
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe("extended");
+    expect(h.calls).toEqual([]); // still no chain write
+    // The round is no longer inside its window: the clock was re-anchored to
+    // now, so a whole fresh timeout must pass before it is asked again.
+    const window = laneRefundWindow(0, { backend: h.backend, cfg }, h.rounds.get("5")!);
+    expect(window.active).toBe(false);
+    expect(store.refundDeadlineFor(5n)).toBeNull();
+    const seenAt = store.openSeenAtFor(5n);
+    expect(seenAt).not.toBeNull();
+    expect(Date.now() - seenAt!).toBeLessThan(2_000);
+  });
+
+  it('"refund now" cancels the round immediately and reopens the lane', async () => {
+    process.env.ROUND_TIMEOUT_MS = "60000";
+    process.env.REFUND_WINDOW_MS = "30000";
+    const h = harness(makeRound({ id: 5n, tier: 0, status: "OPEN", pot: 100_000_000n }), [5n, 0n, 0n]);
+    store.markOpenSeen(5n, Date.now() - 45_000);
+    await advanceTierLane(0, { backend: h.backend, cfg });
+
+    const result = await requestRoundRefund(0, { backend: h.backend, cfg }, 5n);
+
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe("refunded");
+    expect(result.signature).toMatch(/sig-cancel/);
+    expect(h.calls.map((c) => c.action)).toEqual(["cancel", "create"]);
+    expect(h.rounds.get("5")!.status).toBe("CANCELLED");
+    expect(store.currentRoundIdByTier[0]).toBe(h.heads[0]);
+    expect(store.refundDeadlineFor(5n)).toBeNull();
+  });
+
+  it("refuses to refund a round that is not open or has no deposits", async () => {
+    process.env.ROUND_TIMEOUT_MS = "60000";
+    const settling = harness(
+      makeRound({ id: 5n, tier: 0, status: "RANDOMNESS_PENDING", pot: 1_000n }),
+      [5n, 0n, 0n]
+    );
+    const refused = await requestRoundRefund(0, { backend: settling.backend, cfg }, 5n);
+    expect(refused.ok).toBe(false);
+    expect(settling.calls).toEqual([]);
+
+    const empty = harness(makeRound({ id: 9n, tier: 1, status: "OPEN", pot: 0n }), [0n, 9n, 0n]);
+    const nothing = await requestRoundRefund(1, { backend: empty.backend, cfg }, 9n);
+    expect(nothing.ok).toBe(false);
+    expect(empty.calls).toEqual([]);
+  });
+
+  it("broadcasts the prompt exactly once per round", async () => {
+    process.env.ROUND_TIMEOUT_MS = "60000";
+    process.env.REFUND_WINDOW_MS = "30000";
+    const h = harness(makeRound({ id: 5n, tier: 0, status: "OPEN", pot: 100_000_000n }), [5n, 0n, 0n]);
+    const seenAt = Date.now() - 45_000;
+    const events: string[] = [];
+    const off = store.addListener((ev) => events.push(`${ev.type}:${ev.data?.status}`));
+    try {
+      refundWindowFor(5n, 0, { backend: h.backend, cfg }, seenAt, 60_000);
+      refundWindowFor(5n, 0, { backend: h.backend, cfg }, seenAt, 60_000);
+      refundWindowFor(5n, 0, { backend: h.backend, cfg }, seenAt, 60_000);
+    } finally {
+      off();
+    }
+    expect(events).toEqual(["refund_window:pending"]);
   });
 });
 

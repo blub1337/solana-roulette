@@ -351,14 +351,20 @@ export async function advanceTierLane(tier: number, deps: SettlementDriverDeps):
       // permanently locked out of the lane (the `already_deposited` trap).
       //
       // Safety valve: once a funded OPEN round has been observed OPEN for longer
-      // than `ROUND_TIMEOUT_MS`, the driver cancels it (operator-signed
+      // than `ROUND_TIMEOUT_MS`, the driver ends it (operator-signed
       // `cancel_round`, which refunds every participant EXACTLY on chain) and
       // reopens the lane, so deposits can proceed again. A round that is still
       // filling normally (fresh observer) is never touched.
+      //
+      // It is NOT silent any more: from `REFUND_WINDOW_LEAD_MS` before that
+      // deadline the round enters a DECISION WINDOW. The players are asked —
+      // "refund now, or keep waiting?" — and nothing is refunded until the
+      // window closes with nobody choosing to wait. See refundWindowFor().
       const timeoutMs = roundTimeoutMs();
       if (timeoutMs > 0 && round.pot > 0n) {
         const seenAt = store.markOpenSeen(roundId);
-        if (Date.now() - seenAt >= timeoutMs) {
+        const decision = refundWindowFor(roundId, tier, deps, seenAt, timeoutMs);
+        if (decision.status === "refund") {
           await resetStaleOpenRound(tier, deps, roundId, seenAt);
         }
       }
@@ -537,6 +543,7 @@ async function openNextRound(
   if (!created) return null;
   store.currentRoundIdByTier[tier] = created.roundId;
   store.clearOpenSeen(previousId ?? 0n);
+  store.clearRefundWindow(previousId ?? 0n);
   broadcast({ type: "new_round", roundId: created.roundId.toString(), data: { tier, previous: previousId?.toString() } });
   store.upsertRound({ id: created.roundId.toString(), tier, status: "OPEN", feeBps: cfg.feeBps });
   return created;
@@ -564,6 +571,299 @@ export function roundTimeoutMs(): number {
 }
 
 /**
+ * How long before the automatic refund the players are ASKED.
+ *
+ * A quiet round that never reaches its cap is ended by the driver (the safety
+ * valve above), but the players now get a real choice first: take the exact
+ * refund, or keep waiting. The prompt is shown for `REFUND_WINDOW_MS` before
+ * the round would otherwise be refunded, and choosing "keep waiting" pushes the
+ * deadline out again — so a round with active players is never ended under
+ * them. `0` (or `ROUND_TIMEOUT_MS=0`) keeps the old silent behaviour off too:
+ * the valve is the only trigger, and the prompt is simply skipped.
+ */
+export const DEFAULT_REFUND_WINDOW_MS = 120_000;
+export const MIN_REFUND_WINDOW_MS = 15_000;
+export function refundWindowMs(): number {
+  const raw = process.env.REFUND_WINDOW_MS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_REFUND_WINDOW_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_REFUND_WINDOW_MS;
+  if (n <= 0) return 0;
+  return Math.max(Math.round(n), MIN_REFUND_WINDOW_MS);
+}
+
+/**
+ * How much extra wait one "keep waiting" choice buys. Each click re-arms the
+ * round for another full `ROUND_TIMEOUT_MS`, so a player who wants to stay can
+ * hold the round open indefinitely without ever depositing more.
+ */
+export function waitExtensionMs(): number {
+  return roundTimeoutMs() > 0 ? roundTimeoutMs() : DEFAULT_ROUND_TIMEOUT_MS;
+}
+
+/**
+ * The live refund decision of one lane, and the shape the API/UI renders.
+ *
+ * `openMs`        — how long the funded round has been observably OPEN
+ * `deadline`      — epoch ms at which the refund happens if nobody waits
+ * `msRemaining`   — countdown, clamped at 0
+ * `status`        — "open"    = still filling, no prompt
+ *                   "pending" = window armed, players are being asked
+ *                   "refund"  = window closed, the driver refunds this tick
+ * `canWait`       — a funded, not-yet-refunded round can always be extended
+ */
+export interface RefundWindow {
+  active: boolean;
+  status: "open" | "pending" | "refund";
+  openMs: number;
+  deadline: number | null;
+  msRemaining: number;
+  windowMs: number;
+  canRefund: boolean;
+  canWait: boolean;
+}
+
+const REFUND_WINDOW_INACTIVE: RefundWindow = {
+  active: false,
+  status: "open",
+  openMs: 0,
+  deadline: null,
+  msRemaining: 0,
+  windowMs: 0,
+  canRefund: false,
+  canWait: false,
+};
+
+/**
+ * Read (and lazily arm) one round's refund decision window.
+ *
+ * Pure with respect to the chain: it only consults the driver's own open clock
+ * and the window state, so every reader — the settlement tick, `/api/pools`,
+ * `/api/round/current` — sees the SAME deadline. That matters: the UI must
+ * count down to the moment the driver will actually refund, and the driver must
+ * refund the moment the UI said it would.
+ */
+export function refundWindowFor(
+  roundId: bigint,
+  tier: number,
+  deps: SettlementDriverDeps,
+  seenAt: number,
+  timeoutMs: number
+): RefundWindow {
+  if (timeoutMs <= 0) return REFUND_WINDOW_INACTIVE;
+  // A window of 0 means "ask nobody": the round is still refunded at the
+  // deadline, it just skips the prompt (the pre-choice behaviour).
+  const windowMs = Math.max(0, Math.min(refundWindowMs(), timeoutMs));
+
+  const now = Date.now();
+  const refundAt = seenAt + timeoutMs;
+  let deadline = store.refundDeadlineFor(roundId);
+
+  // Arm the window only once the round is close to its refund deadline. A
+  // freshly observed round (or one that was just extended) is left alone.
+  if (deadline === null && windowMs > 0 && now >= refundAt - windowMs) {
+    deadline = refundAt;
+    store.armRefundWindow(roundId, deadline);
+    if (store.markRefundPrompted(roundId)) {
+      txLog.warn("settlement.refund_prompted", {
+        roundId: roundId.toString(),
+        tier,
+        openMs: now - seenAt,
+        refundInMs: Math.max(0, refundAt - now),
+        network: deps.cfg.network,
+      });
+      broadcast({
+        type: "refund_window",
+        roundId: roundId.toString(),
+        data: {
+          tier,
+          status: "pending",
+          openMs: now - seenAt,
+          deadline,
+          msRemaining: Math.max(0, deadline - now),
+          canRefund: true,
+          canWait: true,
+        },
+      });
+    }
+  }
+
+  if (deadline === null) {
+    // No prompt is on the table. Either the round is still filling, or the
+    // prompt is disabled — in which case only the deadline decides.
+    if (now >= refundAt) {
+      return {
+        active: false,
+        status: "refund",
+        openMs: now - seenAt,
+        deadline: refundAt,
+        msRemaining: 0,
+        windowMs,
+        canRefund: false,
+        canWait: false,
+      };
+    }
+    return { ...REFUND_WINDOW_INACTIVE, openMs: now - seenAt };
+  }
+
+  const msRemaining = Math.max(0, deadline - now);
+  if (msRemaining === 0) {
+    return {
+      active: true,
+      status: "refund",
+      openMs: now - seenAt,
+      deadline,
+      msRemaining: 0,
+      windowMs,
+      canRefund: false,
+      canWait: false,
+    };
+  }
+  return {
+    active: true,
+    status: "pending",
+    openMs: now - seenAt,
+    deadline,
+    msRemaining,
+    windowMs,
+    canRefund: true,
+    canWait: true,
+  };
+}
+
+/**
+ * Refund decision window of a lane's CURRENT round, for the public API.
+ *
+ * Best-effort and cheap: the round is already read by the caller, so this only
+ * consults the in-memory window state. A lane with no funded OPEN round (or
+ * with the valve disabled) reports `active: false`.
+ */
+export function laneRefundWindow(
+  tier: number,
+  deps: SettlementDriverDeps,
+  round: RoundData | null
+): RefundWindow {
+  if (!round || round.legacy || round.status !== "OPEN" || round.pot <= 0n) {
+    return REFUND_WINDOW_INACTIVE;
+  }
+  const timeoutMs = roundTimeoutMs();
+  if (timeoutMs <= 0) return REFUND_WINDOW_INACTIVE;
+  const seenAt = store.markOpenSeen(round.id);
+  return refundWindowFor(round.id, tier, deps, seenAt, timeoutMs);
+}
+
+/**
+ * Player action: "keep waiting".
+ *
+ * Extends the round's refund deadline by another full timeout and re-arms the
+ * window so the countdown restarts. It cannot move a lamport, cannot pick a
+ * winner and cannot cancel anything — it only tells the driver that somebody is
+ * still at the table. A refund that is already executing (window closed) is
+ * reported instead of silently ignored.
+ */
+export async function waitLongerOnRound(
+  tier: number,
+  deps: SettlementDriverDeps,
+  roundId: bigint
+): Promise<{ ok: boolean; status: string; detail: string; refundWindow: RefundWindow }> {
+  const round = await deps.backend.getRound(roundId);
+  const current = laneRefundWindow(tier, deps, round);
+  if (!round || round.legacy || round.status !== "OPEN" || round.pot <= 0n) {
+    return {
+      ok: false,
+      status: round?.status ?? "missing",
+      detail: "this round is no longer waiting for a refund decision",
+      refundWindow: current,
+    };
+  }
+  if (current.status === "refund") {
+    return {
+      ok: false,
+      status: "refunding",
+      detail: "the refund for this round is already on its way — it will land in your wallet",
+      refundWindow: current,
+    };
+  }
+
+  const now = Date.now();
+  // Re-anchor the open clock so the round is treated as freshly observed: it is
+  // no longer inside a decision window, and a whole timeout must pass before it
+  // can be refunded again. `clearRefundWindow` also drops the "prompted" flag,
+  // so the next window re-announces itself to the players.
+  store.clearOpenSeen(roundId);
+  store.clearRefundWindow(roundId);
+  store.markOpenSeen(roundId, now);
+  const deadline = now + waitExtensionMs();
+
+  broadcast({
+    type: "refund_window",
+    roundId: roundId.toString(),
+    data: {
+      tier,
+      status: "extended",
+      deadline,
+      msRemaining: Math.max(0, deadline - now),
+      canRefund: true,
+      canWait: true,
+    },
+  });
+  txLog.info("settlement.refund_window_extended", {
+    roundId: roundId.toString(),
+    tier,
+    deadline,
+    network: deps.cfg.network,
+  });
+
+  return {
+    ok: true,
+    status: "extended",
+    detail: "the round will keep waiting — you can join again or stay until it fills",
+    refundWindow: laneRefundWindow(tier, deps, round),
+  };
+}
+
+/**
+ * Player action: "send my deposit back now".
+ *
+ * Immediately ends the round with the SAME on-chain primitive the timeout uses
+ * (`cancel_round`): every participant is refunded EXACTLY from escrow, then the
+ * lane reopens so deposits can proceed. Any player in the round may trigger it
+ * — the money can only ever go back to the participants, so there is no theft
+ * vector, and it is exactly the outcome the timeout would have produced a
+ * moment later.
+ */
+export async function requestRoundRefund(
+  tier: number,
+  deps: SettlementDriverDeps,
+  roundId: bigint
+): Promise<{ ok: boolean; status: string; detail: string; signature: string | null; newRoundId: string | null; refundWindow: RefundWindow }> {
+  const round = await deps.backend.getRound(roundId);
+  if (!round || round.legacy || round.status !== "OPEN" || round.pot <= 0n) {
+    return {
+      ok: false,
+      status: round?.status ?? "missing",
+      detail: "this round is not accepting a refund decision",
+      signature: null,
+      newRoundId: null,
+      refundWindow: REFUND_WINDOW_INACTIVE,
+    };
+  }
+
+  const seenAt = store.openSeenAtFor(roundId) ?? Date.now();
+  const outcome = await resetStaleOpenRound(tier, deps, roundId, seenAt);
+  return {
+    ok: outcome.cancelled,
+    status: outcome.cancelled ? "refunded" : "cancelled_failed",
+    detail: outcome.cancelled
+      ? "your deposit was refunded exactly and the pool reopened"
+      : "the refund could not be submitted right now — the round stays open, try again in a moment",
+    signature: outcome.signature,
+    newRoundId: outcome.newRoundId,
+    refundWindow: REFUND_WINDOW_INACTIVE,
+  };
+}
+
+/**
  * Cancel a stale OPEN round and reopen its lane.
  *
  * `cancel_round` is operator-only on chain and refunds EXACTLY each recorded
@@ -578,21 +878,23 @@ async function resetStaleOpenRound(
   deps: SettlementDriverDeps,
   roundId: bigint,
   seenAt: number
-): Promise<void> {
+): Promise<{ cancelled: boolean; signature: string | null; newRoundId: string | null }> {
   const { backend } = deps;
   const cancelled = await backend.runLifecycle("cancel", { roundId });
   if (!cancelled) {
     // A failed cancel (RPC hiccup, program rejection) must not retry on every
     // tick: re-arm the clock so the next attempt waits another full timeout.
     store.clearOpenSeen(roundId);
+    store.clearRefundWindow(roundId);
     txLog.warn("settlement.stale_round_cancel_failed", {
       roundId: roundId.toString(),
       tier,
       network: deps.cfg.network,
     });
-    return;
+    return { cancelled: false, signature: null, newRoundId: null };
   }
   store.clearOpenSeen(roundId);
+  store.clearRefundWindow(roundId);
   store.upsertRound({ id: roundId.toString(), tier, status: "CANCELLED" });
   // The program refunded every participant exactly on chain, so the round's
   // CONFIRMED ledger rows must stop counting as entries (and as pot): they are
@@ -604,7 +906,17 @@ async function resetStaleOpenRound(
   broadcast({
     type: "settlement",
     roundId: roundId.toString(),
-    data: { tier, reason: "stale_round_cancelled", openMs: Date.now() - seenAt },
+    data: {
+      tier,
+      reason: "stale_round_refunded",
+      openMs: Date.now() - seenAt,
+      refunded: true,
+    },
+  });
+  broadcast({
+    type: "refund_window",
+    roundId: roundId.toString(),
+    data: { tier, status: "refunded", canRefund: false, canWait: false },
   });
   txLog.warn("settlement.stale_round_cancelled", {
     roundId: roundId.toString(),
@@ -614,7 +926,12 @@ async function resetStaleOpenRound(
     orphanedEntries: orphaned,
     network: deps.cfg.network,
   });
-  await openNextRound(tier, deps, roundId);
+  const next = await openNextRound(tier, deps, roundId);
+  return {
+    cancelled: true,
+    signature: cancelled.signature,
+    newRoundId: next?.roundId.toString() ?? null,
+  };
 }
 
 /**

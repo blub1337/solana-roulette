@@ -16,9 +16,16 @@ import { verifySubmittedTransaction } from "./verifyTx.js";
 import { store, broadcast } from "./store.js";
 import { buildCompletedHistory, historyDeps } from "./history.js";
 import { roundToDto, entryToDto } from "./serialize.js";
-import { tierCapLamports } from "./settlement.js";
+import {
+  laneRefundWindow,
+  requestRoundRefund,
+  tierCapLamports,
+  waitLongerOnRound,
+  type RefundWindow,
+} from "./settlement.js";
 import { isTerminalState } from "@solana-roulette/types";
 import type { ChainBackend } from "./backend.js";
+import type { SettlementDriverDeps } from "./settlement.js";
 import { txToDto } from "./txLedger.js";
 import {
   cancelDeposit,
@@ -40,6 +47,13 @@ interface RouteDeps {
   custody: Custody;
   /** The fee the runtime actually enforces — never derived per request. */
   effectiveFee: EffectiveFeeResolver;
+  /**
+   * Settlement driver dependencies, so the refund decision window a player
+   * reads here is computed from the SAME open clock and deadline the driver
+   * refunds on. Optional: tests that only exercise the read paths can omit it,
+   * and a lane simply reports no active window.
+   */
+  driver?: SettlementDriverDeps;
 }
 
 function roundIdFromParams(params: unknown): bigint | null {
@@ -58,7 +72,17 @@ function intEnv(name: string, fallback: number, min: number, max: number): numbe
 }
 
 export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
-  const { backend, connection, programId, cfg, custody, effectiveFee } = deps;
+  const { backend, connection, programId, cfg, custody, effectiveFee, driver } = deps;
+  /**
+   * The refund-or-wait window of a lane's current round, or null when the lane
+   * has none. Read-only: it may lazily ARM the window (that is what broadcasts
+   * the prompt) but never cancels anything — the driver refunds.
+   */
+  const refundWindowOf = (tier: number, round: RoundData | null): RefundWindow | null => {
+    if (!driver || !round || round.legacy || round.status !== "OPEN" || round.pot <= 0n) return null;
+    const window = laneRefundWindow(tier, driver, round);
+    return window.active ? window : null;
+  };
   const depositDeps: DepositDeps = { backend, connection, custody, cfg, programId };
 
   // ---------- SSE ----------
@@ -195,6 +219,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
           payoutLamports: base.lastPayoutLamports,
           feeLamports: base.lastFeeLamports,
           escrow: custody.escrow?.toBase58() ?? null,
+          refundWindow: null,
         });
         continue;
       }
@@ -214,6 +239,9 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
         payoutLamports: base.lastPayoutLamports,
         feeLamports: base.lastFeeLamports,
         escrow: round.escrow.toBase58(),
+        // The refund-or-wait prompt for the pool cards. Null while the round is
+        // filling normally; present once players are being asked to decide.
+        refundWindow: refundWindowOf(round.tier, round),
       });
     }
     return { pools };
@@ -289,7 +317,7 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     if (!round || round.legacy) return { round: null, entries: [] };
     const participants = await backend.getParticipants(round.id);
     return {
-      round: roundToDto(round, cfg),
+      round: { ...roundToDto(round, cfg), refundWindow: refundWindowOf(round.tier, round) },
       entries: participants.map(entryToDto),
     };
   }
@@ -436,6 +464,44 @@ export async function registerRoutes(app: FastifyInstance, deps: RouteDeps) {
     const reason = typeof body.reason === "string" ? body.reason.slice(0, 200) : "rejected by player";
     const result = cancelDeposit(depositId, reason);
     return reply.code(result.status).send(result.body);
+  });
+
+  // ---------- refund decision (player choice on a stalled round) ----------
+  /**
+   * "I want my SOL back now."
+   *
+   * Ends the round with the same on-chain primitive the automatic timeout uses:
+   * `cancel_round` refunds EVERY participant exactly from the round escrow, then
+   * the lane reopens so deposits can proceed. Any player in the round may call
+   * it — the lamports can only ever go back to the participants, so there is no
+   * theft vector — and it is exactly the outcome the timeout would produce a
+   * moment later, just on the player's schedule instead of the clock's.
+   */
+  app.post("/api/round/:id/refund", async (req, reply) => {
+    const id = roundIdFromParams(req.params);
+    if (id === null) return reply.code(400).send({ error: "round id must be numeric" });
+    if (!driver) return reply.code(503).send({ error: "settlement_unavailable", detail: "the settlement driver is not running" });
+    const round = await backend.getRound(id);
+    if (!round) return reply.code(404).send({ error: "round_not_found" });
+    const result = await requestRoundRefund(round.tier, driver, id);
+    return reply.code(result.ok ? 200 : 409).send({ ...result, roundId: id.toString(), tier: round.tier });
+  });
+
+  /**
+   * "Keep my deposit in — I want to wait for the round to fill."
+   *
+   * Extends the round's refund deadline by another full timeout, so a player who
+   * is still at the table is never refunded out from under them. It moves no
+   * lamports and cannot pick a winner.
+   */
+  app.post("/api/round/:id/wait", async (req, reply) => {
+    const id = roundIdFromParams(req.params);
+    if (id === null) return reply.code(400).send({ error: "round id must be numeric" });
+    if (!driver) return reply.code(503).send({ error: "settlement_unavailable", detail: "the settlement driver is not running" });
+    const round = await backend.getRound(id);
+    if (!round) return reply.code(404).send({ error: "round_not_found" });
+    const result = await waitLongerOnRound(round.tier, driver, id);
+    return reply.code(result.ok ? 200 : 409).send({ ...result, roundId: id.toString(), tier: round.tier });
   });
 
   /** Poll a deposit's on-chain state (PENDING → CONFIRMED | FAILED). */
