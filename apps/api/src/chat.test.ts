@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from "vitest";
 import { Keypair, type Connection } from "@solana/web3.js";
-import nacl from "tweetnacl";
+import { ed25519 } from "@noble/curves/ed25519.js";
 import bs58 from "bs58";
 import type { FastifyInstance } from "fastify";
 import { buildServer } from "./server.js";
@@ -8,7 +8,8 @@ import { resetChatState, isClean, isGuestId } from "./chat.js";
 
 /** Sign exactly like the browser wallet would. */
 function signLoginMessage(wallet: Keypair, ts: number): Uint8Array {
-  return nacl.sign.detached(new TextEncoder().encode(`SolRoll chat login\n${ts}`), wallet.secretKey);
+  // Solana Keypair.secretKey is seed‖pub; ed25519 signs with the 32-byte seed.
+  return ed25519.sign(new TextEncoder().encode(`SolRoll chat login\n${ts}`), wallet.secretKey.slice(0, 32));
 }
 
 const OPERATOR = Keypair.generate();

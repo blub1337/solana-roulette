@@ -60,5 +60,17 @@ if (cmd === "status") {
   process.exit(0);
 }
 
-console.error("usage: node scripts/render-deploy.mjs start|status [deployId]");
+if (cmd === "raw") {
+  // Read-only diagnostic: print the JSON for any GET path, e.g.
+  //   node scripts/render-deploy.mjs raw /services/<id>/events?limit=30
+  if (!id) {
+    console.error("usage: node scripts/render-deploy.mjs raw <path>");
+    process.exit(1);
+  }
+  const res = await render(id);
+  console.log(JSON.stringify(res.json, null, 2));
+  process.exit(res.ok ? 0 : 1);
+}
+
+console.error("usage: node scripts/render-deploy.mjs start|status [deployId]|raw <path>");
 process.exit(1);

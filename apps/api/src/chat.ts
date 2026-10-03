@@ -23,7 +23,7 @@
  */
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { createHash } from "node:crypto";
-import nacl from "tweetnacl";
+import { ed25519 } from "@noble/curves/ed25519.js";
 import bs58 from "bs58";
 import type { FastifyInstance } from "fastify";
 import { broadcast } from "./store.js";
@@ -212,18 +212,18 @@ export async function registerChatRoutes(app: FastifyInstance): Promise<void> {
     const message = `SolRoll chat login\n${tsNum}`;
     let ok = false;
     try {
-      ok = nacl.sign.detached.verify(
-        new TextEncoder().encode(message),
+      ok = ed25519.verify(
         bs58.decode(signature58),
+        new TextEncoder().encode(message),
         bs58.decode(wallet)
       );
       if (!ok) {
         // Some wallets return base64 signatures instead of bs58.
         const sig64 = Buffer.from(signature58, "base64");
         if (sig64.length === 64) {
-          ok = nacl.sign.detached.verify(
-            new TextEncoder().encode(message),
+          ok = ed25519.verify(
             new Uint8Array(sig64),
+            new TextEncoder().encode(message),
             bs58.decode(wallet)
           );
         }
