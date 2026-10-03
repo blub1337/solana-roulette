@@ -555,9 +555,13 @@ async function openNextRound(
  * the safety valve entirely (rounds then only ever close at their cap). Values
  * below `MIN_ROUND_TIMEOUT_MS` are clamped so a typo cannot cancel healthy
  * rounds immediately.
+ *
+ * Default: 30 minutes — how long a player waits before their SOL is returned
+ * automatically. (It was 15 minutes; the window was widened so a quiet round
+ * is not ended under players who are still deciding to join.)
  */
 export const MIN_ROUND_TIMEOUT_MS = 60_000;
-export const DEFAULT_ROUND_TIMEOUT_MS = 900_000;
+export const DEFAULT_ROUND_TIMEOUT_MS = 1_800_000;
 export function roundTimeoutMs(): number {
   const raw = process.env.ROUND_TIMEOUT_MS;
   if (raw === undefined || raw.trim() === "") return DEFAULT_ROUND_TIMEOUT_MS;

@@ -153,10 +153,10 @@ afterEach(() => {
 });
 
 describe("roundTimeoutMs (env parsing)", () => {
-  it("defaults to 15 minutes when unset or empty", () => {
+  it("defaults to 30 minutes when unset or empty", () => {
     delete process.env.ROUND_TIMEOUT_MS;
     expect(roundTimeoutMs()).toBe(DEFAULT_ROUND_TIMEOUT_MS);
-    expect(DEFAULT_ROUND_TIMEOUT_MS).toBe(900_000);
+    expect(DEFAULT_ROUND_TIMEOUT_MS).toBe(1_800_000);
     process.env.ROUND_TIMEOUT_MS = "  ";
     expect(roundTimeoutMs()).toBe(DEFAULT_ROUND_TIMEOUT_MS);
   });

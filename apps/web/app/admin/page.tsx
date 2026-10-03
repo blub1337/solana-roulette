@@ -1044,7 +1044,7 @@ export default function AdminPage() {
                   A round only closes at its pool cap, so a quiet lane can sit open forever — and
                   because one wallet gets one entry per round, everyone inside it is locked out of
                   that lane (the &quot;already deposited&quot; case). The driver refunds and reopens a
-                  never-filling round automatically (ROUND_TIMEOUT_MS, default 15 min); the pool
+                  never-filling round automatically (ROUND_TIMEOUT_MS, default 30 min); the pool
                   buttons above do it immediately. Refunds are exact and enforced by the program.
                 </p>
               </div>
